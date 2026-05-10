@@ -1,0 +1,16 @@
+services:
+  dsv4-cc-proxy:
+    build: .
+    container_name: dsv4-cc-proxy
+    ports:
+      - "16889:16889"
+    environment:
+      - PROXY_UPSTREAM=${PROXY_UPSTREAM:-https://api.deepseek.com/anthropic}
+      - PROXY_LOG_LEVEL=${PROXY_LOG_LEVEL:-warning}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:16889/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

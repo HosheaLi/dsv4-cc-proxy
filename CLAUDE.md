@@ -1,4 +1,4 @@
-# P14_dsv4ToCC
+# dsv4-cc-proxy
 
 **DeepSeek Anthropic API 兼容性代理** — 让 Claude Code 在 DeepSeek V4 模型上稳定运行。
 
@@ -8,13 +8,15 @@
 proxy/deepseek-thinking-proxy.py   # 代理核心 (v1.8)
 proxy/test_proxy.py                # 22 个单元测试
 proxy/requirements.txt             # Python 依赖
+scripts/                           # 各平台启动脚本 (macOS/Windows)
+Dockerfile                         # Docker 多阶段构建
 ```
 
 ## 核心技术栈
 
-- Python + Flask（轻量 HTTP 代理）
+- Python + Starlette + httpx（异步 HTTP 代理）
 - SSE 流式处理（事件重写/过滤/剥离）
-- `.plist` macOS launchd 自启
+- Docker（跨平台部署）
 
 ## 关键设计
 
@@ -36,3 +38,17 @@ python3 -m pytest test_proxy.py -v
 
 - `python3 proxy/deepseek-thinking-proxy.py` — 启动代理
 - `python3 -m pytest proxy/test_proxy.py -v` — 运行测试
+- `docker build -t dsv4-cc-proxy .` — 构建 Docker 镜像
+
+## GitHub 增长
+
+- [x] 中英双语 README (`README.md` + `README.zh-CN.md`)
+- [x] MIT 许可证 (`LICENSE`)
+- [x] 贡献指南 (`CONTRIBUTING.md`)
+- [x] Issue 模板 (`.github/ISSUE_TEMPLATE/`)
+- [x] CI 流水线 (`.github/workflows/ci.yml`)
+- [x] Docker 部署支持 (`Dockerfile` + `docker-compose.yml`)
+- [x] Windows 启动脚本 (`scripts/start.bat`, `scripts/start.ps1`)
+- [x] macOS launchd 自启 (`scripts/com.deepseek.thinking-proxy.plist`)
+- [ ] 发布到 V2EX / HackerNews / Reddit
+- [ ] 设置 GitHub Pages 项目页

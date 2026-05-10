@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r proxy/requirements.txt
+        pip install pytest
+
+    - name: Run tests
+      run: python -m pytest proxy/test_proxy.py -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install linting tools
+      run: pip install ruff
+    - name: Lint with ruff
+      run: ruff check proxy/deepseek-thinking-proxy.py proxy/test_proxy.py
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build Docker image
+      run: docker build -t dsv4-cc-proxy .
+    - name: Smoke test Docker image
+      run: |
+        docker run -d -p 16889:16889 --name bridge-test dsv4-cc-proxy
+        sleep 3
+        curl -f http://localhost:16889/health
+        docker stop bridge-test

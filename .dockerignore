@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.DS_Store
+*.log
+README.md
+CLAUDE.md
+scripts/
