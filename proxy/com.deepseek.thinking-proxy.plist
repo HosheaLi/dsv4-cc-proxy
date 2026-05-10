@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.deepseek.thinking-proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lihaoxuan/.claude/proxy/.venv/bin/python3</string>
+        <string>/Users/lihaoxuan/.claude/proxy/deepseek-thinking-proxy.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/lihaoxuan/.claude/proxy/proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lihaoxuan/.claude/proxy/proxy.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/lihaoxuan/.claude/proxy</string>
+</dict>
+</plist>
