@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 import httpx
 from starlette.applications import Starlette
@@ -411,8 +412,6 @@ async def proxy(request):
 
 
 # ---- 生命周期 ----
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
