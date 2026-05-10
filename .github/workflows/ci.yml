@@ -49,11 +49,30 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
     - uses: actions/checkout@v4
-    - name: Build Docker image
-      run: docker build -t dsv4-cc-proxy .
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: hosheali/dsv4-cc-proxy
+        tags: |
+          type=raw,value=latest
+          type=raw,value=${{ github.sha }}
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
     - name: Smoke test Docker image
       run: |
-        docker run -d -p 16889:16889 --name bridge-test dsv4-cc-proxy
+        docker run -d -p 16889:16889 --name bridge-test hosheali/dsv4-cc-proxy
         sleep 3
         curl -f http://localhost:16889/health
         docker stop bridge-test
