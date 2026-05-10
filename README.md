@@ -1,5 +1,7 @@
 <div align="center">
 
+[**中文版 README**](README.zh-CN.md)
+
 # dsv4-cc-proxy
 
 **Make DeepSeek V4 work flawlessly with Claude Code**
