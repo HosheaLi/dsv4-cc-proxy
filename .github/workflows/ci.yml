@@ -147,14 +147,12 @@ jobs:
 
     # --- Homebrew tap update ---
     - name: Update Homebrew tap
-      env:
-        HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       run: |
         VERSION="${{ steps.tag.outputs.VERSION }}"
         TAP_REPO="HosheaLi/homebrew-tap"
         FORMULA_PATH="Formula/dsv4-cc-proxy.rb"
 
-        git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+        git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${TAP_REPO}.git" tap
         cd tap
 
         # 从 PyPI 获取 sdist SHA256

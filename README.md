@@ -48,7 +48,19 @@ dsv4-cc-proxy
 dsv4-cc-proxy --stop
 ```
 
-### Option 2: pipx (isolated environment)
+### Option 2: Homebrew (macOS)
+
+```bash
+brew install hosheali/tap/dsv4-cc-proxy
+
+# Start the proxy
+dsv4-cc-proxy
+
+# Register as a background service (auto-start on login)
+brew services start hosheali/tap/dsv4-cc-proxy
+```
+
+### Option 3: pipx (isolated environment)
 
 ```bash
 pipx install dsv4-cc-proxy

@@ -46,7 +46,19 @@ dsv4-cc-proxy
 dsv4-cc-proxy --stop
 ```
 
-### 方式二：pipx（隔离环境）
+### 方式二：Homebrew（macOS）
+
+```bash
+brew install hosheali/tap/dsv4-cc-proxy
+
+# 启动代理
+dsv4-cc-proxy
+
+# 注册为后台服务（开机自启）
+brew services start hosheali/tap/dsv4-cc-proxy
+```
+
+### 方式三：pipx（隔离环境）
 
 ```bash
 pipx install dsv4-cc-proxy
