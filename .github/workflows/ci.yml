@@ -26,7 +26,9 @@ jobs:
     - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install -e .[test]
+        pip install build
+        python -m build
+        pip install dist/*.whl[test]
 
     - name: Run tests
       run: python -m pytest tests/test_proxy.py -v
@@ -72,7 +74,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-      id-token: write
 
     steps:
     - uses: actions/checkout@v4
@@ -96,12 +97,15 @@ jobs:
         generate_release_notes: true
         name: v${{ steps.tag.outputs.VERSION }}
 
-    # --- PyPI publish (Trusted Publishing / OIDC) ---
+    # --- PyPI publish (API token) ---
     - name: Build sdist & wheel
       run: python -m build
 
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        print-hash: true
 
     # --- Docker publish ---
     - name: Set up Docker Buildx
