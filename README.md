@@ -67,7 +67,7 @@ pipx install dsv4-cc-proxy
 dsv4-cc-proxy
 ```
 
-### Option 3: Docker
+### Option 4: Docker
 
 ```bash
 docker run -d -p 16889:16889 --name dsv4-cc-proxy hosheali/dsv4-cc-proxy:latest
