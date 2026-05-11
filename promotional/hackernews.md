@@ -22,12 +22,12 @@ I built a lightweight proxy that fixes all three transparently: https://github.c
 
 - Python/Starlette/httpx, ~300 lines, zero external dependencies beyond those three
 - 22 unit tests
-- macOS launchd, Windows scheduled task, Linux systemd, Docker – pick your platform
+- PyPI (`pip install dsv4-cc-proxy`), Homebrew (`brew install hosheali/tap/dsv4-cc-proxy`), Docker – pick your install method
 - Non-DeepSeek requests pass through with zero overhead
 
 ```
-pip install -r proxy/requirements.txt
-python3 proxy/deepseek-thinking-proxy.py
+pip install dsv4-cc-proxy
+dsv4-cc-proxy
 # Point Claude Code to http://localhost:16889
 ```
 

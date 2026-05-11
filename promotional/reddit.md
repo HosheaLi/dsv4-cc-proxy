@@ -23,13 +23,12 @@ I traced these to three specific incompatibilities between DeepSeek V4's Anthrop
 **Key features:**
 - Fixes thinking injection, thinking mode normalization, and SSE event stripping
 - 22 unit tests
-- Docker, macOS, Windows, Linux – all supported
+- pip install, Homebrew, Docker – all supported
 - 100% transparent pass-through for non-messages endpoints
 
 ```bash
-git clone https://github.com/HosheaLi/dsv4-cc-proxy
-cd dsv4-cc-proxy && pip install -r proxy/requirements.txt
-python3 proxy/deepseek-thinking-proxy.py
+pip install dsv4-cc-proxy
+dsv4-cc-proxy
 ```
 
 Set `ANTHROPIC_BASE_URL` to `http://localhost:16889` in Claude Code and you're good to go.

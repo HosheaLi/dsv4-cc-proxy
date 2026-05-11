@@ -1,4 +1,5 @@
-在使用 Claude Code 的过程中，Anthropic 官方 API 的调用成本一直是个痛点。DeepSeek V4 提供了兼容 Anthropic 格式的 API，价格优势明显，但实际对接时存在若干协议层面的差异，直接使用的话在进行 Agent spawn 工具调用时会出现不少问题。
+
+在使用 Claude Code 的过程中，Anthropic 官方 API 的调用成本和网络问题一直是个痛点。DeepSeek V4 提供了兼容 Anthropic 格式的 API，价格优势明显，但实际对接时存在若干协议层面的差异，直接使用的话在进行 Agent spawn 工具调用时会出现不少问题。
 
 经过排查，定位到 **3 个核心兼容性问题**：
 
@@ -67,18 +68,31 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com
 
 | 平台 | 部署方式 |
 |------|---------|
+| pip 安装（推荐） | `pip install dsv4-cc-proxy` + `dsv4-cc-proxy` |
+| Homebrew（macOS） | `brew install hosheali/tap/dsv4-cc-proxy` |
 | Docker | `docker run -d -p 16889:16889 hosheali/dsv4-cc-proxy` |
-| macOS | launchd 开机自启 |
+| macOS | launchd 开机自启（`brew services start`） |
 | Windows | 计划任务 / 双击 `.bat` 启动 |
 | Linux | systemd 服务 |
 
-**本地快速启动**：
+**一键安装**：
 
 ```bash
-git clone https://github.com/HosheaLi/dsv4-cc-proxy
-cd dsv4-cc-proxy
-pip install -r proxy/requirements.txt
-python3 proxy/deepseek-thinking-proxy.py
+pip install dsv4-cc-proxy
+dsv4-cc-proxy
+```
+
+**Homebrew（macOS）**：
+
+```bash
+brew install hosheali/tap/dsv4-cc-proxy
+brew services start hosheali/tap/dsv4-cc-proxy
+```
+
+**Docker**：
+
+```bash
+docker run -d -p 16889:16889 --name dsv4-cc-proxy hosheali/dsv4-cc-proxy:latest
 ```
 
 启动后配置 Claude Code 的 `ANTHROPIC_BASE_URL`：

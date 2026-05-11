@@ -19,16 +19,22 @@ Claude Code 很强大，但官方只走 Anthropic API。DeepSeek V4 实现了 An
 特点：
 - 纯 Python，Starlette + httpx，无外部服务依赖
 - 22 个单元测试覆盖各种边界情况
-- 支持 macOS launchd 自启、Windows 计划任务、Linux systemd
-- Docker 一键部署
-- GitHub Actions CI 全自动测试 + Docker Hub 构建
+- pip 安装、Homebrew、Docker 三种安装方式
+- macOS launchd 自启、Windows 计划任务、Linux systemd
+- GitHub Actions CI 全自动测试 + PyPI + Docker Hub + Homebrew 自动发布
 
 Quick Start：
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r proxy/requirements.txt
-python3 proxy/deepseek-thinking-proxy.py
+pip install dsv4-cc-proxy
+dsv4-cc-proxy
+```
+
+Homebrew 用户：
+
+```bash
+brew install hosheali/tap/dsv4-cc-proxy
+brew services start hosheali/tap/dsv4-cc-proxy
 ```
 
 然后把 Claude Code 的 `ANTHROPIC_BASE_URL` 设成 `http://localhost:16889` 就行。
