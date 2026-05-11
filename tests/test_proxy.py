@@ -1,26 +1,19 @@
-"""deepseek-thinking-proxy 单元测试。
+"""dsv4-cc-proxy 单元测试。
 
 覆盖 pure functions: 请求端注入、thinking 标准化、SSE 过滤。
-运行: python3 -m pytest test_proxy.py -v
+运行: python3 -m pytest tests/test_proxy.py -v
 """
 
 import json
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(__file__))
-import importlib.util
-spec = importlib.util.spec_from_file_location("proxy", os.path.join(os.path.dirname(__file__), "deepseek-thinking-proxy.py"))
-proxy_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(proxy_module)
-
-_has_tool_use = proxy_module._has_tool_use
-_has_thinking = proxy_module._has_thinking
-_inject_thinking_blocks = proxy_module._inject_thinking_blocks
-_normalize_thinking = proxy_module._normalize_thinking
-_thinking_requested = proxy_module._thinking_requested
-_filter_sse_line = proxy_module._filter_sse_line
-
+from dsv4_cc_proxy.proxy import (
+    _filter_sse_line,
+    _has_thinking,
+    _has_tool_use,
+    _inject_thinking_blocks,
+    _normalize_thinking,
+    _thinking_requested,
+)
 
 # === 辅助函数 ===
 
@@ -132,7 +125,6 @@ def test_normalize_adaptive_converts():
     }
     assert _normalize_thinking(data)
     assert data["thinking"]["type"] == "disabled"
-    # thinking 块被剥离
     content = data["messages"][0]["content"]
     assert len(content) == 1
     assert content[0]["type"] == "text"
@@ -164,19 +156,27 @@ def test_filter_sse_passes_non_data():
 
 
 def test_filter_sse_passes_text():
-    result, _ = _filter_sse_line('data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}', set())
+    result, _ = _filter_sse_line(
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        set()
+    )
     assert result is not None
 
 
 def test_filter_sse_passes_tool_use():
-    result, _ = _filter_sse_line('data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"Bash","input":{}}}', set())
+    result, _ = _filter_sse_line(
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use",'
+        '"id":"call_1","name":"Bash","input":{}}}',
+        set()
+    )
     assert result is not None
 
 
 def test_filter_sse_filters_thinking_start():
     idx = set()
     result, idx = _filter_sse_line(
-        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+        'data: {"type":"content_block_start","index":0,"content_block":'
+        '{"type":"thinking","thinking":"","signature":""}}',
         idx
     )
     assert result is None
@@ -204,7 +204,8 @@ def test_filter_sse_filters_signature_delta():
 def test_filter_sse_full_thinking_block():
     idx = set()
     lines = [
-        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+        'data: {"type":"content_block_start","index":0,"content_block":'
+        '{"type":"thinking","thinking":"","signature":""}}',
         'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"x"}}',
         'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}',
         'data: {"type":"content_block_stop","index":0}',
@@ -214,7 +215,6 @@ def test_filter_sse_full_thinking_block():
     for line in lines:
         filtered, idx = _filter_sse_line(line, idx)
         results.append(filtered)
-    # 前 4 行被过滤, 第 5 行保留
     assert results == [None, None, None, None, lines[4]]
 
 
@@ -230,8 +230,3 @@ def test_thinking_requested():
     assert not _thinking_requested({"thinking": {"type": "disabled"}})
     assert not _thinking_requested({"thinking": {"type": "adaptive"}})
     assert not _thinking_requested({})
-
-
-if __name__ == "__main__":
-    import pytest
-    sys.exit(pytest.main([__file__, "-v"]))

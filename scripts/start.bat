@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
 set "PROJECT_DIR=%SCRIPT_DIR%.."
 set "VENV_DIR=%PROJECT_DIR%.venv"
-set "PROXY_SCRIPT=%PROJECT_DIR%proxy\deepseek-thinking-proxy.py"
+set "PROXY_SCRIPT=%PROJECT_DIR%dsv4_cc_proxy\__main__.py"
 
 :parse_args
 if /i "%~1"=="--help" goto :help
@@ -67,7 +67,7 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 echo [INFO] Installing dependencies...
-call "%VENV_DIR%\Scripts\pip.exe" install -q -r "%PROJECT_DIR%proxy\requirements.txt"
+call "%VENV_DIR%\Scripts\pip.exe" install -q -e "%PROJECT_DIR%"
 if !ERRORLEVEL! neq 0 (
     echo [ERROR] Failed to install dependencies.
     pause

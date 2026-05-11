@@ -6,8 +6,9 @@
     <string>com.deepseek.thinking-proxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/lihaoxuan/.claude/proxy/.venv/bin/python3</string>
-        <string>/Users/lihaoxuan/.claude/proxy/deepseek-thinking-proxy.py</string>
+        <string>/usr/local/bin/python3</string>
+        <string>-m</string>
+        <string>dsv4_cc_proxy</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -18,6 +19,6 @@
     <key>StandardErrorPath</key>
     <string>/Users/lihaoxuan/.claude/proxy/proxy.log</string>
     <key>WorkingDirectory</key>
-    <string>/Users/lihaoxuan/.claude/proxy</string>
+    <string>/Users/lihaoxuan/code/P14_dsv4ToCC</string>
 </dict>
 </plist>

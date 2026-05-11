@@ -34,7 +34,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Resolve-Path "$PSScriptRoot\.."
-$ProxyScript = Join-Path $ProjectRoot "proxy\deepseek-thinking-proxy.py"
+$ProxyScript = Join-Path $ProjectRoot "dsv4_cc_proxy\__main__.py"
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $TaskName = "DeepSeekBridge"
 
@@ -91,7 +91,7 @@ if ($Install) {
         & $PythonExe -m venv $VenvDir
     }
     Write-Host "[INFO] Installing dependencies..."
-    & (Join-Path $VenvDir "Scripts\pip.exe") install -q -r (Join-Path $ProjectRoot "proxy\requirements.txt")
+    & (Join-Path $VenvDir "Scripts\pip.exe") install -q -e $ProjectRoot
 
     # Register scheduled task
     $action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$ProxyScript`"" -WorkingDirectory $ProjectRoot
@@ -119,7 +119,7 @@ if (-not (Test-Path $VenvPython)) {
     Write-Host "[INFO] Creating virtual environment..."
     & $PythonExe -m venv $VenvDir
     Write-Host "[INFO] Installing dependencies..."
-    & (Join-Path $VenvDir "Scripts\pip.exe") install -q -r (Join-Path $ProjectRoot "proxy\requirements.txt")
+    & (Join-Path $VenvDir "Scripts\pip.exe") install -q -e $ProjectRoot
 }
 
 Write-Host "==============================================" -ForegroundColor Cyan

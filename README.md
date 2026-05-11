@@ -36,20 +36,43 @@ Non-DeepSeek requests and non-`/messages` endpoints pass through with zero overh
 
 ## Quick Start
 
+### Option 1: pip install (recommended)
+
 ```bash
-# 1. Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+pip install dsv4-cc-proxy
 
-# 2. Install dependencies
-pip install -r proxy/requirements.txt
+# Start the proxy (default port 16889)
+dsv4-cc-proxy
 
-# 3. Start the proxy (default port 16889)
-python3 proxy/deepseek-thinking-proxy.py
+# Stop the proxy
+dsv4-cc-proxy --stop
+```
 
-# 4. Point Claude Code to the proxy
-# Set in your Claude Code settings.local.json:
-#   "ANTHROPIC_BASE_URL": "http://localhost:16889"
+### Option 2: pipx (isolated environment)
+
+```bash
+pipx install dsv4-cc-proxy
+dsv4-cc-proxy
+```
+
+### Option 3: Docker
+
+```bash
+docker run -d -p 16889:16889 --name dsv4-cc-proxy hosheali/dsv4-cc-proxy:latest
+```
+
+Or via docker compose:
+
+```bash
+docker compose up -d
+```
+
+### Configuration
+
+Point Claude Code to the proxy by adding to your `settings.local.json`:
+
+```json
+"ANTHROPIC_BASE_URL": "http://localhost:16889"
 ```
 
 ## Configuration
@@ -123,15 +146,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now dsv4-cc-proxy
 ```
 
-## Docker
+## Docker (manual build)
 
 ```bash
-# Build and run
 docker build -t dsv4-cc-proxy .
 docker run -d -p 16889:16889 --name dsv4-cc-proxy dsv4-cc-proxy
-
-# Or use docker compose
-docker compose up -d
 ```
 
 ## How It Works
@@ -158,25 +177,28 @@ The proxy intercepts `POST /v1/messages` and applies three fixes for `deepseek-v
 ## Testing
 
 ```bash
-cd proxy
-python3 -m pytest test_proxy.py -v
+pip install dsv4-cc-proxy[test]
+pytest tests/ -v
 ```
 
 ### Health Check
 
 ```bash
 curl http://localhost:16889/health
-# → {"status":"ok","version":"1.8","upstream":"https://api.deepseek.com/anthropic"}
+# → {"status":"ok","version":"1.8.0","upstream":"https://api.deepseek.com/anthropic"}
 ```
 
 ## Project Structure
 
 ```
 .
-├── proxy/
-│   ├── deepseek-thinking-proxy.py   # Proxy core (v1.8)
-│   ├── test_proxy.py                # 22 unit tests
-│   └── requirements.txt             # Python dependencies
+├── dsv4_cc_proxy/
+│   ├── __init__.py                  # Package entry, exports VERSION + create_app
+│   ├── __main__.py                  # CLI entry — dsv4-cc-proxy command
+│   ├── _version.py                  # VERSION = "1.8.0" (single source of truth)
+│   └── proxy.py                     # Core proxy logic (factory pattern)
+├── tests/
+│   └── test_proxy.py                # 22 unit tests
 ├── scripts/
 │   ├── start.bat                    # Windows batch startup
 │   ├── start.ps1                    # PowerShell startup
@@ -184,10 +206,11 @@ curl http://localhost:16889/health
 │   └── com.deepseek.thinking-proxy.plist  # macOS launchd (optional)
 ├── Dockerfile                       # Docker multi-stage build
 ├── docker-compose.yml               # Docker Compose
+├── pyproject.toml                   # Build config, entry point
+├── MANIFEST.in                      # Package extras
 ├── .github/workflows/ci.yml         # GitHub Actions CI
 ├── LICENSE                          # MIT License
-├── CONTRIBUTING.md                  # Contributor guidelines
-└── README.md
+└── CONTRIBUTING.md                  # Contributor guidelines
 ```
 
 ## Contributing

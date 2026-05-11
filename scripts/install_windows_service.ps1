@@ -33,7 +33,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Resolve-Path "$PSScriptRoot\.."
-$ProxyScript = Join-Path $ProjectRoot "proxy\deepseek-thinking-proxy.py"
+$ProxyScript = Join-Path $ProjectRoot "dsv4_cc_proxy\__main__.py"
 $VenvDir = Join-Path $ProjectRoot ".venv"
 $TaskName = "DeepSeekBridge"
 
@@ -61,7 +61,7 @@ if ($Status) {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
         Write-Host "[STATUS] Task '$TaskName': $($task.State)" -ForegroundColor Green
         $running = Get-Process -Name "python*" -ErrorAction SilentlyContinue | Where-Object {
-            $_.CommandLine -match [Regex]::Escape("deepseek-thinking-proxy")
+            $_.CommandLine -match [Regex]::Escape("dsv4_cc_proxy")
         }
         if ($running) {
             Write-Host "[STATUS] Proxy process is running (PID: $($running.Id))." -ForegroundColor Green
@@ -122,7 +122,7 @@ if (-not (Test-Path $VenvPython)) {
 # 3. Install dependencies
 Write-Step "Installing dependencies..." -Color Cyan
 $pip = Join-Path $VenvDir "Scripts\pip.exe"
-& $pip install -q -r (Join-Path $ProjectRoot "proxy\requirements.txt")
+& $pip install -q -e $ProjectRoot
 if ($LASTEXITCODE -ne 0) {
     Write-Step "ERROR: Failed to install dependencies." -Color Red
     exit 1

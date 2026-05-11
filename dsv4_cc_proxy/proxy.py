@@ -1,23 +1,18 @@
-#!/usr/bin/env python3
-"""DeepSeek Thinking Proxy v1.8.
+# dsv4-cc-proxy / proxy — 核心代理逻辑
+#
+# 环境变量:
+#   PROXY_UPSTREAM    DeepSeek API 地址 (默认 https://api.deepseek.com/anthropic)
+#   PROXY_HOST        监听地址 (默认 127.0.0.1)
+#   PROXY_PORT        监听端口 (默认 16889)
+#   PROXY_LOG_LEVEL   日志级别 (默认 warning)
+#   PROXY_LOG_FILE    日志文件路径 (默认空=仅 stdout)
+#   PROXY_LOG_MAX_BYTES  日志文件最大字节数 (默认 10MB)
+#   PROXY_LOG_BACKUP_COUNT 轮转备份数量 (默认 3)
+#   PROXY_DUMP_DIR    流量捕获目录 (默认空=关闭, ⚠ 含敏感数据)
+#
+# 参考: https://api-docs.deepseek.com/guides/thinking_mode
 
-双向代理修复 DeepSeek Anthropic API 兼容性问题:
-  1. 请求端: 为缺 thinking 块的 tool_use assistant 消息注入空 thinking 块 → 修 400
-  2. 请求端: adaptive 等不支持的 thinking 模式 → disabled + 移除 effort → 修流截断
-  3. 响应端: 剥离意外 thinking/thinking_delta/signature_delta SSE 事件 → 修 Tool result missing
-
-环境变量:
-  PROXY_UPSTREAM   DeepSeek API 地址 (默认 https://api.deepseek.com/anthropic)
-  PROXY_HOST       监听地址 (默认 127.0.0.1)
-  PROXY_PORT       监听端口 (默认 16889)
-  PROXY_LOG_LEVEL         日志级别 (默认 warning, 调试用 info)
-  PROXY_LOG_FILE          日志文件路径 (默认空=仅输出到 stdout)
-  PROXY_LOG_MAX_BYTES     日志文件最大字节数 (默认 10MB, 达到后轮转)
-  PROXY_LOG_BACKUP_COUNT  轮转备份文件数量 (默认 3, 保留 proxy.log.1~proxy.log.3)
-  PROXY_DUMP_DIR          流量捕获目录 (默认空=关闭, 调试用。⚠ 会保存完整请求/响应，含用户数据)
-
-参考: DeepSeek API 文档 https://api-docs.deepseek.com/guides/thinking_mode
-"""
+from __future__ import annotations
 
 import json
 import logging
@@ -28,13 +23,12 @@ from contextlib import asynccontextmanager
 
 import httpx
 from starlette.applications import Starlette
-from starlette.responses import StreamingResponse, JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
-import uvicorn
+
+from dsv4_cc_proxy._version import VERSION
 
 # ---- 配置 ----
-
-VERSION = "1.8"
 
 DEEPSEEK_BASE = os.getenv("PROXY_UPSTREAM", "https://api.deepseek.com/anthropic")
 HOST = os.getenv("PROXY_HOST", "127.0.0.1")
@@ -44,22 +38,21 @@ except (TypeError, ValueError):
     print("Error: PROXY_PORT must be an integer", file=sys.stderr)
     sys.exit(1)
 LOG_LEVEL = os.getenv("PROXY_LOG_LEVEL", "warning")
-DUMP_DIR = os.getenv("PROXY_DUMP_DIR", "")  # 调试用, ⚠ 含敏感数据
+DUMP_DIR = os.getenv("PROXY_DUMP_DIR", "")
 
 # SSE 流处理参数上限
-MAX_EVENT_TYPES = 50     # 记录的最大事件类型数
-MAX_FILTERED_LINES = 200 # 记录的最大过滤后行数
-DUMP_PREVIEW_LINES = 30  # dump 文件中保留的预览行数
-DUMP_MAX_BYTES = 500000  # dump 文件最大字节数
-LOG_EVENT_PREVIEW = 15   # 日志中事件预览数
+MAX_EVENT_TYPES = 50
+MAX_FILTERED_LINES = 200
+DUMP_PREVIEW_LINES = 30
+DUMP_MAX_BYTES = 500000
+LOG_EVENT_PREVIEW = 15
 LOG_FILE = os.getenv("PROXY_LOG_FILE", "")
-LOG_MAX_BYTES = int(os.getenv("PROXY_LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 默认 10MB
+LOG_MAX_BYTES = int(os.getenv("PROXY_LOG_MAX_BYTES", str(10 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("PROXY_LOG_BACKUP_COUNT", "3"))
 
 log_format = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 log_level = getattr(logging, LOG_LEVEL.upper(), logging.WARNING)
 
-# stdout handler
 _stream_handler = logging.StreamHandler(sys.stdout)
 _stream_handler.setFormatter(log_format)
 
@@ -68,7 +61,6 @@ _root.setLevel(log_level)
 _root.handlers.clear()
 _root.addHandler(_stream_handler)
 
-# rotating file handler (optional)
 if LOG_FILE:
     _file_handler = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
@@ -83,6 +75,7 @@ _shared_client: httpx.AsyncClient | None = None
 
 # ---- httpx 客户端 ----
 
+
 def _get_client() -> httpx.AsyncClient:
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
@@ -95,6 +88,7 @@ def _get_client() -> httpx.AsyncClient:
 
 # ---- 健康检查 ----
 
+
 async def health(request):
     return JSONResponse({
         "status": "ok",
@@ -104,6 +98,7 @@ async def health(request):
 
 
 # ---- 修复 1: 请求端 thinking 注入 ----
+
 
 def _has_tool_use(content: list) -> bool:
     return any(
@@ -119,10 +114,6 @@ def _has_thinking(content: list) -> bool:
 
 
 def _inject_thinking_blocks(data: dict) -> bool:
-    """为 tool_use assistant 消息注入空 thinking 块。
-
-    仅在 thinking 启用时注入。disabled 模式下 DeepSeek 不要求 thinking 块。
-    """
     thinking_cfg = data.get("thinking", {})
     if not isinstance(thinking_cfg, dict):
         return False
@@ -151,17 +142,8 @@ def _inject_thinking_blocks(data: dict) -> bool:
 
 # ---- 修复 2: thinking 模式标准化 ----
 
+
 def _normalize_thinking(data: dict) -> bool:
-    """处理 DeepSeek 不支持的 thinking 模式。
-
-    官方文档 (api-docs.deepseek.com/guides/thinking_mode):
-    - 只支持 thinking.type = enabled | disabled (无 adaptive)
-    - Agent 类请求自动设置 effort=max → 无限思考
-    - disabled 时不允许 reasoning_effort/output_config
-
-    adaptive → disabled + 剥离 thinking 块 + 移除 effort 参数
-    enabled/disabled → 保持不变
-    """
     if "thinking" not in data:
         return False
     thinking_cfg = data["thinking"]
@@ -172,16 +154,13 @@ def _normalize_thinking(data: dict) -> bool:
     if thinking_type in ("enabled", "disabled"):
         return False
 
-    # adaptive / 其他 → disabled
     data["thinking"] = {"type": "disabled"}
 
-    # 移除 effort 参数 (disabled 不允许)
     for key in ("reasoning_effort", "output_config"):
         val = data.pop(key, None)
         if val is not None:
             logger.info("[THINKING] removed %s=%s", key, val)
 
-    # 剥离 assistant 消息中的 thinking 块 (disabled 不需要)
     stripped = 0
     for msg in data.get("messages", []):
         if msg.get("role") != "assistant":
@@ -197,15 +176,17 @@ def _normalize_thinking(data: dict) -> bool:
             stripped += len(content) - len(new_content)
             msg["content"] = new_content
 
-    logger.info("[THINKING] converted %s → disabled, stripped %d thinking blocks",
-                thinking_type, stripped)
+    logger.info(
+        "[THINKING] converted %s → disabled, stripped %d thinking blocks",
+        thinking_type, stripped,
+    )
     return True
 
 
 # ---- 修复 3: 响应端 thinking 剥离 ----
 
+
 def _thinking_requested(data: dict) -> bool:
-    """检查原始请求是否显式启用了 extended thinking。"""
     thinking_cfg = data.get("thinking", {})
     return (
         isinstance(thinking_cfg, dict)
@@ -214,10 +195,6 @@ def _thinking_requested(data: dict) -> bool:
 
 
 def _filter_sse_line(line: str, thinking_indices: set) -> tuple:
-    """过滤 SSE data 行中的 thinking 事件。
-
-    Returns: (filtered_line_or_None, updated_thinking_indices)
-    """
     if not line.startswith("data: "):
         return line, thinking_indices
 
@@ -244,10 +221,11 @@ def _filter_sse_line(line: str, thinking_indices: set) -> tuple:
     return line, thinking_indices
 
 
-# ---- 流量捕获 (调试, ⚠ 含敏感数据) ----
+# ---- 流量捕获 ----
+
 
 if DUMP_DIR:
-    logger.warning("⚠ PROXY_DUMP_DIR enabled — sensitive conversation data will be saved to %s", DUMP_DIR)
+    logger.warning("⚠ PROXY_DUMP_DIR enabled — data saved to %s", DUMP_DIR)
 
 
 def _dump_json(filename: str, data):
@@ -267,8 +245,10 @@ def _summarize_request(data: dict) -> dict:
     tools = data.get("tools", [])
     system = data.get("system", "")
     if isinstance(system, list):
-        system = " ".join(b.get("text", "") if isinstance(b, dict) else str(b)
-                         for b in system[:2])
+        system = " ".join(
+            b.get("text", "") if isinstance(b, dict) else str(b)
+            for b in system[:2]
+        )
     return {
         "model": data.get("model", "?"),
         "stream": data.get("stream", False),
@@ -283,8 +263,8 @@ def _summarize_request(data: dict) -> dict:
 
 # ---- 请求处理 ----
 
+
 def _build_response_headers(upstream_resp, is_sse: bool) -> dict:
-    """构建下游响应头，SSE 时保留 chunked 编码。"""
     strip_keys = {"transfer-encoding", "content-encoding"}
     if is_sse:
         strip_keys.add("content-length")
@@ -302,7 +282,6 @@ async def proxy(request):
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in ("host",)}
 
-    # 仅 POST /v1/messages 需要拦截
     is_messages = (method == "POST" and path.rstrip("/").endswith("/messages"))
 
     body = await request.body() if is_messages else b""
@@ -358,7 +337,6 @@ async def proxy(request):
     logger.info("[RESP] status=%s sse=%s", upstream_resp.status_code, is_sse)
 
     if not strip_thinking or not is_sse:
-        # 纯流式透传
         async def passthrough():
             try:
                 async for chunk in upstream_resp.aiter_bytes():
@@ -374,7 +352,6 @@ async def proxy(request):
             headers=_build_response_headers(upstream_resp, is_sse),
         )
 
-    # 修复 3: 剥离 thinking 事件
     logger.info("[FILTER] stripping thinking from SSE stream")
 
     async def filtered_stream():
@@ -434,7 +411,7 @@ async def proxy(request):
     )
 
 
-# ---- 生命周期 ----
+# ---- 应用工厂 ----
 
 
 @asynccontextmanager
@@ -446,18 +423,11 @@ async def lifespan(app):
         await _shared_client.aclose()
 
 
-app = Starlette(
-    lifespan=lifespan,
-    routes=[
-        Route("/health", health, methods=["GET"]),
-        Route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]),
-    ],
-)
-
-
-if __name__ == "__main__":
-    print(f"DeepSeek Thinking Proxy v{VERSION} → {DEEPSEEK_BASE}")
-    print(f"Listening on http://{HOST}:{PORT}")
-    if DUMP_DIR:
-        print(f"⚠ DUMP mode: {DUMP_DIR}")
-    uvicorn.run(app, host=HOST, port=PORT, log_level=LOG_LEVEL)
+def create_app() -> Starlette:
+    return Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/health", health, methods=["GET"]),
+            Route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]),
+        ],
+    )
