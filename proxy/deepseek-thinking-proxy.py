@@ -10,14 +10,18 @@
   PROXY_UPSTREAM   DeepSeek API 地址 (默认 https://api.deepseek.com/anthropic)
   PROXY_HOST       监听地址 (默认 127.0.0.1)
   PROXY_PORT       监听端口 (默认 16889)
-  PROXY_LOG_LEVEL  日志级别 (默认 warning, 调试用 info)
-  PROXY_DUMP_DIR   流量捕获目录 (默认空=关闭, 调试用。⚠ 会保存完整请求/响应，含用户数据)
+  PROXY_LOG_LEVEL         日志级别 (默认 warning, 调试用 info)
+  PROXY_LOG_FILE          日志文件路径 (默认空=仅输出到 stdout)
+  PROXY_LOG_MAX_BYTES     日志文件最大字节数 (默认 10MB, 达到后轮转)
+  PROXY_LOG_BACKUP_COUNT  轮转备份文件数量 (默认 3, 保留 proxy.log.1~proxy.log.3)
+  PROXY_DUMP_DIR          流量捕获目录 (默认空=关闭, 调试用。⚠ 会保存完整请求/响应，含用户数据)
 
 参考: DeepSeek API 文档 https://api-docs.deepseek.com/guides/thinking_mode
 """
 
 import json
 import logging
+import logging.handlers
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -48,11 +52,30 @@ MAX_FILTERED_LINES = 200 # 记录的最大过滤后行数
 DUMP_PREVIEW_LINES = 30  # dump 文件中保留的预览行数
 DUMP_MAX_BYTES = 500000  # dump 文件最大字节数
 LOG_EVENT_PREVIEW = 15   # 日志中事件预览数
+LOG_FILE = os.getenv("PROXY_LOG_FILE", "")
+LOG_MAX_BYTES = int(os.getenv("PROXY_LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 默认 10MB
+LOG_BACKUP_COUNT = int(os.getenv("PROXY_LOG_BACKUP_COUNT", "3"))
 
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL.upper(), logging.WARNING),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+log_format = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+log_level = getattr(logging, LOG_LEVEL.upper(), logging.WARNING)
+
+# stdout handler
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setFormatter(log_format)
+
+_root = logging.getLogger()
+_root.setLevel(log_level)
+_root.handlers.clear()
+_root.addHandler(_stream_handler)
+
+# rotating file handler (optional)
+if LOG_FILE:
+    _file_handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
+    _file_handler.setFormatter(log_format)
+    _root.addHandler(_file_handler)
+
 logger = logging.getLogger("deepseek-proxy")
 
 _shared_client: httpx.AsyncClient | None = None
