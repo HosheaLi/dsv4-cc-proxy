@@ -6,8 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "dsv4-cc-proxy"
 description = "DeepSeek Anthropic API 兼容性代理 — 让 Claude Code 在 DeepSeek V4 模型上稳定运行"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 keywords = ["deepseek", "claude", "proxy", "anthropic", "api"]
 authors = [{name = "HosheaLi"}]
@@ -15,6 +14,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Web Environment",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
