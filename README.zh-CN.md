@@ -142,8 +142,7 @@ After=network.target
 [Service]
 Type=simple
 User=your-user
-WorkingDirectory=/path/to/dsv4-cc-proxy
-ExecStart=/path/to/.venv/bin/python3 proxy/deepseek-thinking-proxy.py
+ExecStart=/usr/local/bin/dsv4-cc-proxy
 Restart=on-failure
 RestartSec=5
 

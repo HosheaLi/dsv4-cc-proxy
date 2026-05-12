@@ -40,15 +40,14 @@
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 安装依赖
-pip install -r proxy/requirements.txt
-pip install pytest ruff
+# 安装依赖和开发工具
+pip install -e ".[dev]"
 
 # 运行测试
-python3 -m pytest proxy/test_proxy.py -v
+python3 -m pytest tests/ -v
 
 # 代码检查
-ruff check proxy/
+ruff check dsv4_cc_proxy/ tests/
 ```
 
 ## 代码规范
@@ -73,7 +72,7 @@ chore: 更新依赖版本
 
 ## 测试要求
 
-- 所有现有测试必须通过：`python3 -m pytest proxy/test_proxy.py -v`
+- 所有现有测试必须通过：`python3 -m pytest tests/ -v`
 - 新功能的测试覆盖率 ≥ 80%
 - 测试命名：`test_函数_场景_预期`
 

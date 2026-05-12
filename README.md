@@ -79,7 +79,7 @@ Or via docker compose:
 docker compose up -d
 ```
 
-### Configuration
+### Configure Claude Code
 
 Point Claude Code to the proxy by adding to your `settings.local.json`:
 
@@ -144,8 +144,7 @@ After=network.target
 [Service]
 Type=simple
 User=your-user
-WorkingDirectory=/path/to/dsv4-cc-proxy
-ExecStart=/path/to/.venv/bin/python3 proxy/deepseek-thinking-proxy.py
+ExecStart=/usr/local/bin/dsv4-cc-proxy
 Restart=on-failure
 RestartSec=5
 
