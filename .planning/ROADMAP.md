@@ -27,7 +27,7 @@
 **Plans**: 1 plan
 
 Plans:
-- [ ] 01-01-PLAN.md — 搭建 codex/ 子包骨架，实现模型映射配置系统和测试基础设施
+- [x] 01-01-PLAN.md — 搭建 codex/ 子包骨架，实现模型映射配置系统和测试基础设施
 
 ### Phase 2: Request Translation
 **Goal**: Responses API 输入正确翻译为 Chat Completions messages 格式
