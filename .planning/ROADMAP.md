@@ -6,7 +6,7 @@
 
 ## Phases
 
-- [ ] **Phase 1: Foundation & Config** - codex/ 子包骨架、模型映射配置、测试基础设施
+- [x] **Phase 1: Foundation & Config** - codex/ 子包骨架、模型映射配置、测试基础设施 (2026-06-05)
 - [ ] **Phase 2: Request Translation** - Responses API input 翻译为 Chat Completions messages
 - [ ] **Phase 3: Tool Support** - 工具格式转换与 Schema 自动修复
 - [ ] **Phase 4: SSE State Machine** - 流式事件翻译（文本/推理/工具调用/类型转换）
@@ -15,16 +15,17 @@
 
 ## Phase Details
 
-### Phase 1: Foundation & Config
+### Phase 1: Foundation & Config (✅ Complete — 2026-06-05)
 **Goal**: Codex 子包可用，模型映射可配置且确定
 **Depends on**: Nothing (first phase)
 **Requirements**: CODX-16, CODX-17, CODX-18
 **Success Criteria** (what must be TRUE):
-  1. Developer can set `CODEX_DEFAULT_MODEL` env var to control default DeepSeek target model
-  2. Developer can set `CODEX_MODEL_MAP` JSON env var for custom model name-to-model mappings
-  3. Any model name sent by Codex (including unmapped ones) resolves to a valid DeepSeek model string — no 404 errors
-  4. `dsv4_cc_proxy.codex` is importable and `config.py` exposes clean resolution API
-**Plans**: 1 plan
+  1. ✅ Developer can set `CODEX_DEFAULT_MODEL` env var to control default DeepSeek target model
+  2. ✅ Developer can set `CODEX_MODEL_MAP` JSON env var for custom model name-to-model mappings
+  3. ✅ Any model name sent by Codex (including unmapped ones) resolves to a valid DeepSeek model string — no 404 errors
+  4. ✅ `dsv4_cc_proxy.codex` is importable and `config.py` exposes clean resolution API
+**Plans**: 1 plan (1/1 complete)
+**Verification**: 28 tests passed, coverage ≥80%, code review with 5 findings (0 critical)
 
 Plans:
 - [x] 01-01-PLAN.md — 搭建 codex/ 子包骨架，实现模型映射配置系统和测试基础设施
