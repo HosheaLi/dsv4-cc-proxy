@@ -40,7 +40,11 @@ Plans:
   3. `function_call` items attach tool_calls to the preceding assistant message (creating synthetic assistant if needed)
   4. `function_call_output` items translate to tool role messages
   5. Reasoning content is maintained across turns: assistant messages with tool_calls always include `reasoning_content: ""` to satisfy DeepSeek validation
-**Plans**: TBD
+**Plans**: 2 plans (0/2 complete)
+
+Plans:
+- [ ] 02-01-PLAN.md — 创建 translate.py，实现完整的 Responses → Chat 请求翻译逻辑
+- [ ] 02-02-PLAN.md — 创建 test_translate.py，覆盖所有翻译行为的综合测试套件
 
 ### Phase 3: Tool Support
 **Goal**: 工具定义正确转换并自动修复以满足 DeepSeek 严格 Schema 校验
@@ -94,8 +98,8 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Config | 0/1 | Planning | - |
-| 2. Request Translation | 0/0 | Not started | - |
+| 1. Foundation & Config | 1/1 | Complete | 2026-06-05 |
+| 2. Request Translation | 0/2 | Planning | - |
 | 3. Tool Support | 0/0 | Not started | - |
 | 4. SSE State Machine | 0/0 | Not started | - |
 | 5. Route Integration | 0/0 | Not started | - |
