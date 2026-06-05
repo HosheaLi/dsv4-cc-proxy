@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "one-search": {
+      "command": "one-search-mcp",
+      "env": {
+        "SEARCH_PROVIDER": "searxng",
+        "SEARXNG_URL": "http://192.168.0.79:15356"
+      }
+    }
+  }
+}

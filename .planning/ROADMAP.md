@@ -24,7 +24,10 @@
   2. Developer can set `CODEX_MODEL_MAP` JSON env var for custom model name-to-model mappings
   3. Any model name sent by Codex (including unmapped ones) resolves to a valid DeepSeek model string — no 404 errors
   4. `dsv4_cc_proxy.codex` is importable and `config.py` exposes clean resolution API
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 01-01-PLAN.md — 搭建 codex/ 子包骨架，实现模型映射配置系统和测试基础设施
 
 ### Phase 2: Request Translation
 **Goal**: Responses API 输入正确翻译为 Chat Completions messages 格式
@@ -90,7 +93,7 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Config | 0/0 | Not started | - |
+| 1. Foundation & Config | 0/1 | Planning | - |
 | 2. Request Translation | 0/0 | Not started | - |
 | 3. Tool Support | 0/0 | Not started | - |
 | 4. SSE State Machine | 0/0 | Not started | - |
