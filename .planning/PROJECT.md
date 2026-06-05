@@ -16,6 +16,10 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
 - ✓ DeepSeek V4 Pro/Flash 双模型支持
 - ✓ SSE 流式响应处理
 - ✓ 环境变量配置
+- ✓ **CODX-05**: Codex 模型名 → DeepSeek 模型的可配置映射（Phase 1: foundation-config 已验证）
+  - `resolve_model()` API：精确匹配 → 最长前缀匹配 → 默认回退
+  - `CODEX_DEFAULT_MODEL` / `CODEX_MODEL_MAP` 环境变量配置
+  - 6 个单元测试覆盖，91% 覆盖率，零回归
 
 ### Active
 
@@ -23,7 +27,7 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
 - [ ] **CODX-02**: Codex 工具调用（shell、文件操作等）正常工作，包括并行工具调用
 - [ ] **CODX-03**: DeepSeek 推理/思考能力在 Codex 中可用（reasoning→thinking 映射）
 - [ ] **CODX-04**: Codex 多轮对话正常，reasoning 状态在多轮间正确维护
-- [ ] **CODX-05**: 灵活的模型映射（Codex 模型名 → DeepSeek 模型，可配置）
+- ~~**CODX-05**: 灵活的模型映射（Codex 模型名 → DeepSeek 模型，可配置）~~ → ✅ Phase 1 已验证
 - [ ] **CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）
 - [ ] **CODX-07**: 压缩端点正确处理（返回 501 触发 Codex 内联压缩）
 
@@ -57,9 +61,9 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| 子包分离（`codex/` 目录） | vendor isolation 模式，便于后续加 Anthropic Plan B | — Pending |
+| 子包分离（`codex/` 目录） | vendor isolation 模式，便于后续加 Anthropic Plan B | ✅ Phase 1 已实现 |
 | Chat Completions 为上游 | 与 Responses API 语义更近 | — Pending |
-| 两层模型映射 | 兼顾快速设置和灵活配置 | — Pending |
+| 两层模型映射 | 兼顾快速设置和灵活配置 | ✅ Phase 1 已实现 |
 | 压缩返回 501 | Codex 自动降级到内联压缩 | — Pending |
 | 空字符串 reasoning 修复 | 满足 DeepSeek 校验，无需 SQLite 缓存 | — Pending |
 
@@ -81,4 +85,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-04 after initialization*
+*Last updated: 2026-06-05 after Phase 1 foundation-config completion*
