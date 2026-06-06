@@ -75,8 +75,8 @@ Plans:
 **Plans**: 2 plans (0/2 complete)
 
 Plans:
-- [ ] 04-01-PLAN.md — SSE State Machine Implementation (sse.py + reasoning.effort + __init__.py)
-- [ ] 04-02-PLAN.md — SSE Test Suite + Reasoning Test
+- [x] 04-01-PLAN.md — SSE State Machine Implementation (sse.py + reasoning.effort + __init__.py)
+- [x] 04-02-PLAN.md — SSE Test Suite + Reasoning Test
 
 ### Phase 5: Route Integration
 **Goal**: `/v1/responses` HTTP 端点正常工作，不影响现有路由
