@@ -43,8 +43,8 @@ Plans:
 **Plans**: 2 plans (0/2 complete)
 
 Plans:
-- [ ] 02-01-PLAN.md — 创建 translate.py，实现完整的 Responses → Chat 请求翻译逻辑
-- [ ] 02-02-PLAN.md — 创建 test_translate.py，覆盖所有翻译行为的综合测试套件
+- [x] 02-01-PLAN.md — 创建 translate.py，实现完整的 Responses → Chat 请求翻译逻辑
+- [x] 02-02-PLAN.md — 创建 test_translate.py，覆盖所有翻译行为的综合测试套件
 
 ### Phase 3: Tool Support
 **Goal**: 工具定义正确转换并自动修复以满足 DeepSeek 严格 Schema 校验
