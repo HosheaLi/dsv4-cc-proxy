@@ -471,6 +471,71 @@ def test_reasoning_anomalous_sequence(monkeypatch):
     assert len(user_msgs) == 2
 
 
+def test_reasoning_effort_mapping(monkeypatch):
+    """验证 reasoning.effort -> thinking 参数映射 (CODX-12, D-10, D-11)。
+
+    - low/medium/high 都映射为 thinking: {"type": "enabled"}
+    - 映射后 reasoning 字段从 body 中移除
+    - 无 reasoning.effort 时不添加 thinking
+    """
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    # 1. effort=high 映射
+    body = {
+        "model": "gpt-5.3-codex",
+        "reasoning": {"effort": "high"},
+        "input": [{"role": "user", "content": "Hello"}],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert result["thinking"] == {"type": "enabled"}
+    assert "reasoning" not in result
+
+    # 2. effort=medium 映射
+    body = {
+        "model": "gpt-5.3-codex",
+        "reasoning": {"effort": "medium"},
+        "input": [{"role": "user", "content": "Hello"}],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert result["thinking"] == {"type": "enabled"}
+    assert "reasoning" not in result
+
+    # 3. effort=low 映射
+    body = {
+        "model": "gpt-5.3-codex",
+        "reasoning": {"effort": "low"},
+        "input": [{"role": "user", "content": "Hello"}],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert result["thinking"] == {"type": "enabled"}
+    assert "reasoning" not in result
+
+    # 4. 无 reasoning.effort — 不添加 thinking
+    body = {
+        "model": "gpt-5.3-codex",
+        "input": [{"role": "user", "content": "Hello"}],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert "thinking" not in result
+
+    # 5. reasoning 为空 dict — 不添加 thinking，移除 reasoning
+    body = {
+        "model": "gpt-5.3-codex",
+        "reasoning": {},
+        "input": [{"role": "user", "content": "Hello"}],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert "thinking" not in result
+    assert "reasoning" not in result
+
+
 # =============================================================================
 # 组 5: 边界情况
 # =============================================================================
