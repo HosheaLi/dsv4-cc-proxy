@@ -20,6 +20,7 @@ import json
 import logging
 
 from dsv4_cc_proxy.codex.config import CODEX_DEFAULT_MODEL, CODEX_UPSTREAM, resolve_model
+from dsv4_cc_proxy.codex.tools import convert_tools
 
 logger = logging.getLogger("deepseek-proxy")
 
@@ -280,7 +281,11 @@ def translate_request(request_body: dict) -> dict:
     # 8. 移除 Responses-only 字段
     body.pop("include", None)
 
-    # 9. 设置 messages
+    # 9. 工具定义格式转换 (Phase 3, CODX-07, CODX-10)
+    if "tools" in body:
+        body["tools"] = convert_tools(body["tools"])
+
+    # 10. 设置 messages
     body["messages"] = messages
 
     return body
