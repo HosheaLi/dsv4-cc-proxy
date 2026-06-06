@@ -75,6 +75,8 @@ Each task was committed atomically:
 2. **Task 2: Update __init__.py to export convert_tools** — `e942766` (feat)
 3. **Task 3: Integrate convert_tools into translate_request** — `868d356` (feat)
 
+**Plan metadata:** `f5e7b4f` (docs: complete plan 02 summary)
+
 ## Files Created/Modified
 - `tests/test_tools.py` (CREATED) — 21 test functions, 305 lines, 5 groups covering CODX-07 and CODX-10
 - `dsv4_cc_proxy/codex/__init__.py` (MODIFIED) — Added `convert_tools` import and `__all__` export
