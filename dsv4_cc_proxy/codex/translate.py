@@ -281,11 +281,18 @@ def translate_request(request_body: dict) -> dict:
     # 8. 移除 Responses-only 字段
     body.pop("include", None)
 
-    # 9. 工具定义格式转换 (Phase 3, CODX-07, CODX-10)
+    # 9. reasoning.effort -> thinking 映射 (Phase 4, CODX-12, D-10)
+    reasoning = body.get("reasoning", {})
+    if isinstance(reasoning, dict) and reasoning.get("effort") in ("low", "medium", "high"):
+        body["thinking"] = {"type": "enabled"}
+    # D-11: remove reasoning field after mapping
+    body.pop("reasoning", None)
+
+    # 10. 工具定义格式转换 (Phase 3, CODX-07, CODX-10)
     if "tools" in body:
         body["tools"] = convert_tools(body["tools"])
 
-    # 10. 设置 messages
+    # 11. 设置 messages
     body["messages"] = messages
 
     return body
