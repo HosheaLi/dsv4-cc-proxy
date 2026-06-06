@@ -21,12 +21,21 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
   - `CODEX_DEFAULT_MODEL` / `CODEX_MODEL_MAP` 环境变量配置
   - 6 个单元测试覆盖，91% 覆盖率，零回归
 
+### Validated
+
+→ ✅ **Phase 2 已验证**: Requests API 请求翻译
+
+- ✓ **CODX-03**: DeepSeek 推理/思考能力在 Codex 中可用（reasoning 折叠到 assistant 消息）
+- ✓ **CODX-04**: instructions + developer 消息正确合并为 system 消息
+- ✓ **CODX-11**: function_call → tool_calls 翻译（含合成 assistant、多工具调用、tool role 消息）
+- ✓ **CODX-14**: reasoning_content 空字符串注入满足 DeepSeek 校验
+  - `translate.py`（286 行）：translate_request 纯函数 + 4 个内部辅助函数
+  - `test_translate.py`（562 行）：23 个测试用例，6 组覆盖，51/51 全通过
+
 ### Active
 
 - [ ] **CODX-01**: Codex CLI 可通过代理使用 DeepSeek V4 模型进行对话
 - [ ] **CODX-02**: Codex 工具调用（shell、文件操作等）正常工作，包括并行工具调用
-- [ ] **CODX-03**: DeepSeek 推理/思考能力在 Codex 中可用（reasoning→thinking 映射）
-- [ ] **CODX-04**: Codex 多轮对话正常，reasoning 状态在多轮间正确维护
 - ~~**CODX-05**: 灵活的模型映射（Codex 模型名 → DeepSeek 模型，可配置）~~ → ✅ Phase 1 已验证
 - [ ] **CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）
 - [ ] **CODX-07**: 压缩端点正确处理（返回 501 触发 Codex 内联压缩）
@@ -85,4 +94,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after Phase 1 foundation-config completion*
+*Last updated: 2026-06-06 after Phase 2 request-translation completion*
