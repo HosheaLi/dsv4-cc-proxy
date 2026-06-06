@@ -46,7 +46,7 @@ Plans:
 - [x] 02-01-PLAN.md — 创建 translate.py，实现完整的 Responses → Chat 请求翻译逻辑
 - [x] 02-02-PLAN.md — 创建 test_translate.py，覆盖所有翻译行为的综合测试套件
 
-### Phase 3: Tool Support
+### Phase 3: Tool Support (✅ Complete — 2026-06-06)
 **Goal**: 工具定义正确转换并自动修复以满足 DeepSeek 严格 Schema 校验
 **Depends on**: Phase 2
 **Requirements**: CODX-07, CODX-10
@@ -55,7 +55,7 @@ Plans:
   2. Tool schema auto-repair strips unsupported fields: `default`, `readOnly`, `writeOnly`, `examples`
   3. Schema repair handles nested `$defs` or `properties` recursively — all levels are cleaned
   4. Empty `enum` arrays in schemas are removed before sending to DeepSeek
-**Plans**: 2 plans
+**Plans**: 2 plans (2/2 complete)
 
 Plans:
 - [x] 03-01-PLAN.md — 创建 tools.py 核心模块: 工具格式转换与 Schema 修复
@@ -72,7 +72,11 @@ Plans:
   4. Full SSE event lifecycle fires in order: `response.created` → `response.in_progress` → (output_item.added / delta events) → `response.output_item.done` → `response.completed`
   5. Multiple parallel tool calls (different indices) produce independent, correctly-ordered event streams — no index collision
   6. Type transitions (reasoning → text → tool_calls) fire proper `output_item.done` + new `output_item.added` events
-**Plans**: TBD
+**Plans**: 2 plans (0/2 complete)
+
+Plans:
+- [ ] 04-01-PLAN.md — SSE State Machine Implementation (sse.py + reasoning.effort + __init__.py)
+- [ ] 04-02-PLAN.md — SSE Test Suite + Reasoning Test
 
 ### Phase 5: Route Integration
 **Goal**: `/v1/responses` HTTP 端点正常工作，不影响现有路由
@@ -104,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Foundation & Config | 1/1 | Complete | 2026-06-05 |
 | 2. Request Translation | 2/2 | Complete | 2026-06-06 |
-| 3. Tool Support | 2/2 | Complete    | 2026-06-06 |
-| 4. SSE State Machine | 0/0 | Not started | - |
+| 3. Tool Support | 2/2 | Complete | 2026-06-06 |
+| 4. SSE State Machine | 0/2 | Not started | - |
 | 5. Route Integration | 0/0 | Not started | - |
 | 6. Testing & Release | 0/0 | Not started | - |
