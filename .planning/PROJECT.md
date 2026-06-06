@@ -32,13 +32,23 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
   - `translate.py`（286 行）：translate_request 纯函数 + 4 个内部辅助函数
   - `test_translate.py`（562 行）：23 个测试用例，6 组覆盖，51/51 全通过
 
+### Validated
+
+→ ✅ **Phase 3 已验证**: 工具格式转换与 Schema 自动修复
+
+- ✓ **CODX-07**: Responses API 扁平工具格式 → Chat Completions 嵌套格式（`{type, function: {name, desc, params, strict}}`）
+- ✓ **CODX-10**: 递归剥离 8 个不兼容 JSON Schema 字段 + 空 enum 移除。遍历 properties/$defs/anyOf/items 路径
+  - `tools.py`（160 行）：convert_tools 纯函数 + _convert_tool_format + _clean_schema 内部辅助
+  - `test_tools.py`（305 行）：21 个测试用例，5 组覆盖，72/72 全通过
+
 ### Active
 
 - [ ] **CODX-01**: Codex CLI 可通过代理使用 DeepSeek V4 模型进行对话
 - [ ] **CODX-02**: Codex 工具调用（shell、文件操作等）正常工作，包括并行工具调用
 - ~~**CODX-05**: 灵活的模型映射（Codex 模型名 → DeepSeek 模型，可配置）~~ → ✅ Phase 1 已验证
-- [ ] **CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）
-- [ ] **CODX-07**: 压缩端点正确处理（返回 501 触发 Codex 内联压缩）
+- ~~**CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）~~ → ✅ Phase 3 已验证
+- ~~**CODX-07**: 压缩端点正确处理（返回 501 触发 Codex 内联压缩）~~ → ✅ Phase 3 已验证
+- [ ] **CODX-10**: Schema 自动修复 → ✅ Phase 3 已验证
 
 ### Out of Scope
 
@@ -94,4 +104,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-06 after Phase 2 request-translation completion*
+*Last updated: 2026-06-06 after Phase 3 tool-support completion*
