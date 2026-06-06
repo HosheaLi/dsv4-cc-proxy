@@ -41,6 +41,20 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
   - `tools.py`（160 行）：convert_tools 纯函数 + _convert_tool_format + _clean_schema 内部辅助
   - `test_tools.py`（305 行）：21 个测试用例，5 组覆盖，72/72 全通过
 
+→ ✅ **Phase 4 已验证**: SSE 状态机翻译引擎
+
+- ✓ **CODX-05**: Chat `delta.content` → SSE `response.output_text.delta` 事件
+- ✓ **CODX-06**: 完整 SSE 生命周期：`response.created` → `response.in_progress` → (output_item.added / delta events) → `response.output_item.done` → `response.completed`
+- ✓ **CODX-08**: Chat `delta.tool_calls` → SSE `response.function_call_arguments.delta` 事件（含 index 追踪和 arguments 累计）
+- ✓ **CODX-09**: 多工具并行调用（不同 index 产生独立事件流，无 index 碰撞）
+- ✓ **CODX-12**: `reasoning.effort` → `thinking: {"type": "enabled"}` 参数映射
+- ✓ **CODX-13**: Chat `delta.reasoning_content` → SSE `response.reasoning_text.delta` 事件
+- ✓ **CODX-15**: 类型转换（reasoning → text → tool_calls）触发正确的 `output_item.done` + `output_item.added` 事件
+  - `sse.py`（667 行）：translate_sse_stream 异步生成器 + 12 个私有事件构建函数
+  - `test_sse.py`（533 行）：17 个测试用例，8 组场景覆盖，sse.py 覆盖率 98%
+  - `translate.py`：reasoning.effort 映射（5 子情况测试覆盖），translate.py 覆盖率 92%
+  - 90/90 测试全通过
+
 ### Active
 
 - [ ] **CODX-01**: Codex CLI 可通过代理使用 DeepSeek V4 模型进行对话
@@ -48,7 +62,12 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
 - ~~**CODX-05**: 灵活的模型映射（Codex 模型名 → DeepSeek 模型，可配置）~~ → ✅ Phase 1 已验证
 - ~~**CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）~~ → ✅ Phase 3 已验证
 - ~~**CODX-07**: 压缩端点正确处理（返回 501 触发 Codex 内联压缩）~~ → ✅ Phase 3 已验证
+- ~~**CODX-08**: tool_calls 流式翻译 → ✅ Phase 4 已验证~~
+- ~~**CODX-09**: 多工具并行流 → ✅ Phase 4 已验证~~
 - [ ] **CODX-10**: Schema 自动修复 → ✅ Phase 3 已验证
+- ~~**CODX-12**: reasoning.effort 映射 → ✅ Phase 4 已验证~~
+- ~~**CODX-13**: reasoning_content 流式翻译 → ✅ Phase 4 已验证~~
+- ~~**CODX-15**: 类型转换事件序列 → ✅ Phase 4 已验证~~
 
 ### Out of Scope
 
@@ -104,4 +123,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-06 after Phase 3 tool-support completion*
+*Last updated: 2026-06-06 after Phase 4 sse-state-machine completion*
