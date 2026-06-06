@@ -8,7 +8,7 @@
 
 - [x] **Phase 1: Foundation & Config** - codex/ 子包骨架、模型映射配置、测试基础设施 (2026-06-05)
 - [x] **Phase 2: Request Translation** - Responses API input 翻译为 Chat Completions messages
-- [ ] **Phase 3: Tool Support** - 工具格式转换与 Schema 自动修复
+- [x] **Phase 3: Tool Support** - 工具格式转换与 Schema 自动修复 (completed 2026-06-06)
 - [ ] **Phase 4: SSE State Machine** - 流式事件翻译（文本/推理/工具调用/类型转换）
 - [ ] **Phase 5: Route Integration** - HTTP handler、认证透传、压缩端点
 - [ ] **Phase 6: Testing & Release** - 全面测试、文档更新、版本发布
@@ -58,8 +58,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — 创建 tools.py 核心模块: 工具格式转换与 Schema 修复
-- [ ] 03-02-PLAN.md — 测试工具模块 + 导出集成到 __init__.py 和 translate_request
+- [x] 03-01-PLAN.md — 创建 tools.py 核心模块: 工具格式转换与 Schema 修复
+- [x] 03-02-PLAN.md — 测试工具模块 + 导出集成到 __init__.py 和 translate_request
 
 ### Phase 4: SSE State Machine
 **Goal**: DeepSeek Chat 流式事件翻译为 Responses API 标准 SSE 事件序列
@@ -104,7 +104,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Foundation & Config | 1/1 | Complete | 2026-06-05 |
 | 2. Request Translation | 2/2 | Complete | 2026-06-06 |
-| 3. Tool Support | 0/2 | Planning | - |
+| 3. Tool Support | 2/2 | Complete    | 2026-06-06 |
 | 4. SSE State Machine | 0/0 | Not started | - |
 | 5. Route Integration | 0/0 | Not started | - |
 | 6. Testing & Release | 0/0 | Not started | - |
