@@ -7,7 +7,7 @@
 ## Phases
 
 - [x] **Phase 1: Foundation & Config** - codex/ 子包骨架、模型映射配置、测试基础设施 (2026-06-05)
-- [ ] **Phase 2: Request Translation** - Responses API input 翻译为 Chat Completions messages
+- [x] **Phase 2: Request Translation** - Responses API input 翻译为 Chat Completions messages
 - [ ] **Phase 3: Tool Support** - 工具格式转换与 Schema 自动修复
 - [ ] **Phase 4: SSE State Machine** - 流式事件翻译（文本/推理/工具调用/类型转换）
 - [ ] **Phase 5: Route Integration** - HTTP handler、认证透传、压缩端点
@@ -30,17 +30,17 @@
 Plans:
 - [x] 01-01-PLAN.md — 搭建 codex/ 子包骨架，实现模型映射配置系统和测试基础设施
 
-### Phase 2: Request Translation
+### Phase 2: Request Translation (✅ Complete — 2026-06-06)
 **Goal**: Responses API 输入正确翻译为 Chat Completions messages 格式
 **Depends on**: Phase 1
 **Requirements**: CODX-03, CODX-04, CODX-11, CODX-14
 **Success Criteria** (what must be TRUE):
-  1. Responses API `input` array (message / function_call / function_call_output items) translates to correct Chat messages sequence
-  2. `instructions` field merges with developer role messages into a single system message at the top
-  3. `function_call` items attach tool_calls to the preceding assistant message (creating synthetic assistant if needed)
-  4. `function_call_output` items translate to tool role messages
-  5. Reasoning content is maintained across turns: assistant messages with tool_calls always include `reasoning_content: ""` to satisfy DeepSeek validation
-**Plans**: 2 plans (0/2 complete)
+  1. ✅ Responses API `input` array (message / function_call / function_call_output items) translates to correct Chat messages sequence
+  2. ✅ `instructions` field merges with developer role messages into a single system message at the top
+  3. ✅ `function_call` items attach tool_calls to the preceding assistant message (creating synthetic assistant if needed)
+  4. ✅ `function_call_output` items translate to tool role messages
+  5. ✅ Reasoning content is maintained across turns: assistant messages with tool_calls always include `reasoning_content: ""` to satisfy DeepSeek validation
+**Plans**: 2 plans (2/2 complete)
 
 Plans:
 - [x] 02-01-PLAN.md — 创建 translate.py，实现完整的 Responses → Chat 请求翻译逻辑
@@ -55,7 +55,11 @@ Plans:
   2. Tool schema auto-repair strips unsupported fields: `default`, `readOnly`, `writeOnly`, `examples`
   3. Schema repair handles nested `$defs` or `properties` recursively — all levels are cleaned
   4. Empty `enum` arrays in schemas are removed before sending to DeepSeek
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 03-01-PLAN.md — 创建 tools.py 核心模块: 工具格式转换与 Schema 修复
+- [ ] 03-02-PLAN.md — 测试工具模块 + 导出集成到 __init__.py 和 translate_request
 
 ### Phase 4: SSE State Machine
 **Goal**: DeepSeek Chat 流式事件翻译为 Responses API 标准 SSE 事件序列
@@ -99,8 +103,8 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Config | 1/1 | Complete | 2026-06-05 |
-| 2. Request Translation | 0/2 | Planning | - |
-| 3. Tool Support | 0/0 | Not started | - |
+| 2. Request Translation | 2/2 | Complete | 2026-06-06 |
+| 3. Tool Support | 0/2 | Planning | - |
 | 4. SSE State Machine | 0/0 | Not started | - |
 | 5. Route Integration | 0/0 | Not started | - |
 | 6. Testing & Release | 0/0 | Not started | - |
