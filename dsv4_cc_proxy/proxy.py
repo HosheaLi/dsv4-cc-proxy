@@ -27,6 +27,9 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from dsv4_cc_proxy._version import VERSION
+from dsv4_cc_proxy.codex.config import CODEX_UPSTREAM
+from dsv4_cc_proxy.codex.sse import translate_sse_stream
+from dsv4_cc_proxy.codex.translate import translate_request
 
 # ---- 配置 ----
 
@@ -411,6 +414,250 @@ async def proxy(request):
     )
 
 
+# ---- Codex Responses API handler ----
+
+
+ERROR_CODE_MAP = {
+    400: ("invalid_request_error", "Bad request"),
+    401: ("authentication_error", "Invalid API key"),
+    403: ("permission_error", "Access denied"),
+    404: ("invalid_request_error", "Endpoint not found"),
+    408: ("timeout_error", "Request timeout"),
+    422: ("invalid_request_error", "Unprocessable entity"),
+    429: ("rate_limit_error", "Rate limit exceeded"),
+    500: ("server_error", "DeepSeek server error"),
+    502: ("server_error", "Upstream service unavailable"),
+    503: ("server_error", "Service overloaded"),
+}
+
+
+def _build_error(status_code: int, error_type: str, code: str, message: str) -> JSONResponse:
+    """构建 Responses API 标准错误响应。"""
+    return JSONResponse(
+        {"error": {"type": error_type, "code": code, "message": message, "param": None}},
+        status_code=status_code,
+    )
+
+
+def _translate_upstream_error(status_code: int, body: bytes) -> JSONResponse:
+    """将 DeepSeek 错误翻译为 Responses API 错误格式。"""
+    error_type, default_message = ERROR_CODE_MAP.get(
+        status_code, ("server_error", "Unknown error")
+    )
+
+    detail = default_message
+    try:
+        ds_error = json.loads(body)
+        if isinstance(ds_error, dict):
+            err_obj = ds_error.get("error", {})
+            if isinstance(err_obj, dict):
+                detail = err_obj.get("message", default_message)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+
+    return JSONResponse(
+        {
+            "error": {
+                "type": error_type,
+                "code": str(status_code),
+                "message": detail,
+                "param": None,
+            }
+        },
+        status_code=status_code,
+    )
+
+
+def _translate_chat_to_responses(chat_response: dict, model: str) -> dict:
+    """将 Chat Completions JSON -> Responses API JSON (非流式)。"""
+    choices = chat_response.get("choices") or [{}]
+    choice = choices[0] if choices else {}
+    message = choice.get("message", {})
+
+    output = []
+
+    # reasoning_content -> output item
+    reasoning = (message.get("reasoning_content") or "").strip()
+    if reasoning:
+        output.append({
+            "id": f"item_{len(output)}",
+            "type": "reasoning",
+            "status": "completed",
+            "content": [{"type": "reasoning_text", "text": reasoning}],
+        })
+
+    # content -> output item
+    content = (message.get("content") or "").strip()
+    if content:
+        output.append({
+            "id": f"item_{len(output)}",
+            "type": "message",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": content}],
+            "role": "assistant",
+        })
+
+    # tool_calls -> output items
+    for tc in message.get("tool_calls", []):
+        tc_id = tc.get("id", "")
+        func = tc.get("function", {})
+        output.append({
+            "id": tc_id,
+            "type": "function_call",
+            "status": "completed",
+            "name": func.get("name", "unknown"),
+            "arguments": func.get("arguments", ""),
+            "call_id": tc_id,
+        })
+
+    return {
+        "id": f"resp_{chat_response.get('id', 'unknown')}",
+        "object": "response",
+        "model": model,
+        "status": "completed",
+        "output": output,
+        "usage": chat_response.get("usage", {
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+        }),
+    }
+
+
+async def _iter_lines(response: httpx.Response):
+    """将 httpx 流式响应拆行为异步行生成器。"""
+    buffer = ""
+    async for chunk in response.aiter_bytes():
+        text = chunk.decode("utf-8", errors="replace")
+        buffer += text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            yield line
+    if buffer.strip():
+        yield buffer
+
+
+async def _handle_stream_response(chat_request: dict, headers: dict, upstream_url: str):
+    """流式: Chat delta chunk -> SSE 事件流。"""
+    chat_request["stream"] = True
+    client = _get_client()
+
+    try:
+        req = client.build_request(
+            method="POST", url=upstream_url, headers=headers,
+            content=json.dumps(chat_request, ensure_ascii=False).encode("utf-8"),
+        )
+        upstream_resp = await client.send(req, stream=True)
+    except Exception:
+        logger.exception("[CODEX] upstream request failed")
+        return _build_error(502, "proxy_error", "upstream_unavailable",
+                           "Failed to reach DeepSeek API")
+
+    if upstream_resp.status_code != 200:
+        body = b""
+        async for chunk in upstream_resp.aiter_bytes():
+            body += chunk
+        await upstream_resp.aclose()
+        return _translate_upstream_error(upstream_resp.status_code, body)
+
+    async def event_stream():
+        async def json_stream():
+            try:
+                async for line in _iter_lines(upstream_resp):
+                    if line.startswith("data: "):
+                        try:
+                            chunk = json.loads(line[6:])
+                            yield chunk
+                        except json.JSONDecodeError:
+                            continue
+                    elif line.strip() == "data: [DONE]":
+                        continue
+            finally:
+                await upstream_resp.aclose()
+
+        async for sse_event in translate_sse_stream(json_stream()):
+            yield sse_event.encode("utf-8")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        status_code=200,
+    )
+
+
+async def _handle_non_stream_response(chat_request: dict, headers: dict, upstream_url: str):
+    """非流式: 获取完整 Chat JSON -> 翻译为 Responses API JSON。"""
+    chat_request["stream"] = False
+    client = _get_client()
+
+    try:
+        req = client.build_request(
+            method="POST", url=upstream_url, headers=headers,
+            content=json.dumps(chat_request, ensure_ascii=False).encode("utf-8"),
+        )
+        upstream_resp = await client.send(req, stream=False)
+    except Exception:
+        logger.exception("[CODEX] upstream request failed")
+        return _build_error(502, "proxy_error", "upstream_unavailable",
+                           "Failed to reach DeepSeek API")
+
+    if upstream_resp.status_code != 200:
+        body = getattr(upstream_resp, 'content', b"")
+        await upstream_resp.aclose()
+        return _translate_upstream_error(upstream_resp.status_code, body)
+
+    chat_response = upstream_resp.json()
+    await upstream_resp.aclose()
+
+    response_body = _translate_chat_to_responses(chat_response, chat_request.get("model", ""))
+    return JSONResponse(response_body, status_code=200)
+
+
+async def responses_handler(request):
+    """POST /v1/responses -- Codex CLI 协议代理入口。"""
+    logger.info("[CODEX] POST /v1/responses")
+
+    try:
+        request_body = await request.json()
+    except json.JSONDecodeError:
+        return _build_error(400, "invalid_request_error", "invalid_json",
+                           "Request body is not valid JSON")
+
+    headers = {
+        "content-type": "application/json",
+        "authorization": request.headers.get("authorization", ""),
+    }
+
+    try:
+        chat_request = translate_request(request_body)
+    except Exception:
+        logger.exception("[CODEX] translate_request failed")
+        return _build_error(400, "invalid_request_error", "translation_failed",
+                           "Failed to translate request")
+
+    upstream_url = f"{CODEX_UPSTREAM}/chat/completions"
+
+    is_stream = request_body.get("stream", False)
+    if is_stream:
+        return await _handle_stream_response(chat_request, headers, upstream_url)
+    else:
+        return await _handle_non_stream_response(chat_request, headers, upstream_url)
+
+
+async def compact_handler(request):
+    """POST /v1/responses/compact -- 暂不支持,返回 501。"""
+    logger.info("[CODEX] POST /v1/responses/compact -- 501 not_implemented")
+    return JSONResponse(
+        {
+            "error": {
+                "type": "not_supported",
+                "message": "Compaction is not yet supported for Codex + DeepSeek V4",
+                "code": "501",
+                "param": None,
+            }
+        },
+        status_code=501,
+    )
+
+
 # ---- 应用工厂 ----
 
 
@@ -428,6 +675,8 @@ def create_app() -> Starlette:
         lifespan=lifespan,
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/v1/responses/compact", compact_handler, methods=["POST"]),
+            Route("/v1/responses", responses_handler, methods=["POST"]),
             Route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]),
         ],
     )
