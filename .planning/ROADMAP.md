@@ -108,7 +108,7 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 06-01-PLAN.md — Test Coverage Expansion (__main__.py + proxy.py coverage gap tests)
+- [x] 06-01-PLAN.md — Test Coverage Expansion (__main__.py + proxy.py coverage gap tests)
 - [ ] 06-02-PLAN.md — E2E Tests & Test Refactor
 - [ ] 06-03-PLAN.md — Documentation & CI (README/CHANGELOG/codex-integration + CI improvements)
 - [ ] 06-04-PLAN.md — Version & Release (bump to 2.0.0 + regression + release guide)
@@ -122,4 +122,4 @@ Plans:
 | 3. Tool Support | 2/2 | Complete | 2026-06-06 |
 | 4. SSE State Machine | 2/2 | Complete | 2026-06-07 |
 | 5. Route Integration | 1/1 | Complete | 2026-06-07 |
-| 6. Testing & Release | 0/4 | Planning | - |
+| 6. Testing & Release | 1/4 | In Progress|  |
