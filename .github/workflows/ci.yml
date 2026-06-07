@@ -10,18 +10,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-      fail-fast: false
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.12"
 
     - name: Install dependencies
       run: |
@@ -29,7 +25,22 @@ jobs:
         pip install ".[test]"
 
     - name: Run tests
-      run: python -m pytest tests/test_proxy.py -v
+      run: python -m pytest tests/ -v --cov=dsv4_cc_proxy --cov-report=term
+
+    - name: Generate coverage badge
+      if: github.ref == 'refs/heads/main'
+      run: |
+        pip install coverage-badge
+        coverage-badge -o coverage.svg
+
+    - name: Commit coverage badge
+      if: github.ref == 'refs/heads/main'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add coverage.svg
+        git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
+        git push
 
   lint:
     runs-on: ubuntu-latest
@@ -72,6 +83,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+      id-token: write
 
     steps:
     - uses: actions/checkout@v4
@@ -95,14 +107,13 @@ jobs:
         generate_release_notes: true
         name: v${{ steps.tag.outputs.VERSION }}
 
-    # --- PyPI publish (API token) ---
+    # --- PyPI publish (OIDC) ---
     - name: Build sdist & wheel
       run: python -m build
 
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
         print-hash: true
 
     # --- Docker publish ---
@@ -124,6 +135,7 @@ jobs:
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=raw,value=latest
+          type=sha
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v6
@@ -144,27 +156,3 @@ jobs:
         sleep 3
         curl -f http://localhost:16889/health
         docker stop verify-proxy
-
-    # --- Homebrew tap update ---
-    - name: Update Homebrew tap
-      run: |
-        VERSION="${{ steps.tag.outputs.VERSION }}"
-        TAP_REPO="HosheaLi/homebrew-tap"
-        FORMULA_PATH="Formula/dsv4-cc-proxy.rb"
-
-        git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${TAP_REPO}.git" tap
-        cd tap
-
-        # 从 PyPI 获取 sdist SHA256
-        SDIST_URL="https://files.pythonhosted.org/packages/source/d/dsv4-cc-proxy/dsv4_cc_proxy-${VERSION}.tar.gz"
-        SHA256=$(curl -sL "$SDIST_URL" | sha256sum | cut -d' ' -f1)
-
-        sed -i "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA_PATH"
-        sed -i "s|url \".*\"|url \"${SDIST_URL}\"|" "$FORMULA_PATH"
-        sed -i "s/sha256 \".*\"/sha256 \"${SHA256}\"/" "$FORMULA_PATH"
-
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add "$FORMULA_PATH"
-        git commit -m "dsv4-cc-proxy: update to v${VERSION}"
-        git push
