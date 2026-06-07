@@ -2,16 +2,16 @@
 
 ## Overview
 
-为现有 dsv4-cc-proxy 增加 OpenAI Responses API 兼容层，让 Codex CLI 能通过 DeepSeek V4 模型运行。从零搭建 `codex/` 子包（vendor isolation 模式），实现输入翻译、工具转换、SSE 状态机、路由集成，最终发布 v1.9.0。不影响现有 Anthropic 代理功能。
+为现有 dsv4-cc-proxy 增加 OpenAI Responses API 兼容层，让 Codex CLI 能通过 DeepSeek V4 模型运行。从零搭建 `codex/` 子包（vendor isolation 模式），实现输入翻译、工具转换、SSE 状态机、路由集成，最终发布 v2.0.0。不影响现有 Anthropic 代理功能。
 
 ## Phases
 
 - [x] **Phase 1: Foundation & Config** - codex/ 子包骨架、模型映射配置、测试基础设施 (2026-06-05)
 - [x] **Phase 2: Request Translation** - Responses API input 翻译为 Chat Completions messages
 - [x] **Phase 3: Tool Support** - 工具格式转换与 Schema 自动修复 (completed 2026-06-06)
-- [ ] **Phase 4: SSE State Machine** - 流式事件翻译（文本/推理/工具调用/类型转换）
-- [ ] **Phase 5: Route Integration** - HTTP handler、认证透传、压缩端点
-- [ ] **Phase 6: Testing & Release** - 全面测试、文档更新、版本发布
+- [x] **Phase 4: SSE State Machine** - 流式事件翻译（文本/推理/工具调用/类型转换）
+- [x] **Phase 5: Route Integration** - HTTP handler、认证透传、压缩端点
+- [ ] **Phase 6: Testing & Release** - 全面测试、文档更新、版本发布 v2.0.0
 
 ## Phase Details
 
@@ -61,7 +61,7 @@ Plans:
 - [x] 03-01-PLAN.md — 创建 tools.py 核心模块: 工具格式转换与 Schema 修复
 - [x] 03-02-PLAN.md — 测试工具模块 + 导出集成到 __init__.py 和 translate_request
 
-### Phase 4: SSE State Machine
+### Phase 4: SSE State Machine (✅ Complete)
 **Goal**: DeepSeek Chat 流式事件翻译为 Responses API 标准 SSE 事件序列
 **Depends on**: Phase 2, Phase 3
 **Requirements**: CODX-05, CODX-06, CODX-08, CODX-09, CODX-12, CODX-13, CODX-15
@@ -72,13 +72,13 @@ Plans:
   4. Full SSE event lifecycle fires in order: `response.created` → `response.in_progress` → (output_item.added / delta events) → `response.output_item.done` → `response.completed`
   5. Multiple parallel tool calls (different indices) produce independent, correctly-ordered event streams — no index collision
   6. Type transitions (reasoning → text → tool_calls) fire proper `output_item.done` + new `output_item.added` events
-**Plans**: 2 plans (0/2 complete)
+**Plans**: 2 plans (2/2 complete)
 
 Plans:
 - [x] 04-01-PLAN.md — SSE State Machine Implementation (sse.py + reasoning.effort + __init__.py)
 - [x] 04-02-PLAN.md — SSE Test Suite + Reasoning Test
 
-### Phase 5: Route Integration
+### Phase 5: Route Integration (✅ Complete)
 **Goal**: `/v1/responses` HTTP 端点正常工作，不影响现有路由
 **Depends on**: Phase 4
 **Requirements**: CODX-01, CODX-02, CODX-19, CODX-20, CODX-21
@@ -88,19 +88,30 @@ Plans:
   3. `POST /v1/responses/compact` returns HTTP 501 with valid error JSON body
   4. Existing `POST /v1/messages` routes continue to work — all 22 existing proxy tests pass
   5. `Authorization` header from Codex request passes through to DeepSeek API unchanged
-**Plans**: TBD
+**Plans**: 1 plan (1/1 complete)
+
+Plans:
+- [x] 05-01-PLAN.md — 创建 HTTP 路由 + 认证透传 + 压缩端点 + 集成测试
 
 ### Phase 6: Testing & Release
-**Goal**: 所有 codex 模块测试通过，文档完整，版本发布
+**Goal**: 所有 codex 模块测试通过，文档完整，版本发布 v2.0.0
 **Depends on**: Phase 5
 **Requirements**: (All codex requirements implicitly covered by test verification)
 **Success Criteria** (what must be TRUE):
-  1. All codex modules (config, translate, tools) have >=80% test line coverage
-  2. All 22 existing proxy tests still pass — zero regressions
-  3. New environment variables (`CODEX_DEFAULT_MODEL`, `CODEX_MODEL_MAP`, `CODEX_UPSTREAM`) documented in README
-  4. Version is bumped to 1.9.0 and tagged
-  5. New `/v1/responses` endpoints documented in relevant docs
-**Plans**: TBD
+  1. All codex modules (config, translate, tools, sse) have >=80% test line coverage
+  2. proxy.py and __main__.py coverage >=85% (from 61% and 0% respectively)
+  3. All existing proxy tests still pass — zero regressions
+  4. New environment variables (`CODEX_DEFAULT_MODEL`, `CODEX_MODEL_MAP`, `CODEX_UPSTREAM`) documented in README
+  5. Version is bumped to 2.0.0 and tagged
+  6. New `/v1/responses` endpoints documented in relevant docs
+  7. CI publishes via PyPI OIDC Trusted Publishing
+**Plans**: 4 plans
+
+Plans:
+- [ ] 06-01-PLAN.md — Test Coverage Expansion (__main__.py + proxy.py coverage gap tests)
+- [ ] 06-02-PLAN.md — E2E Tests & Test Refactor
+- [ ] 06-03-PLAN.md — Documentation & CI (README/CHANGELOG/codex-integration + CI improvements)
+- [ ] 06-04-PLAN.md — Version & Release (bump to 2.0.0 + regression + release guide)
 
 ## Progress
 
@@ -109,6 +120,6 @@ Plans:
 | 1. Foundation & Config | 1/1 | Complete | 2026-06-05 |
 | 2. Request Translation | 2/2 | Complete | 2026-06-06 |
 | 3. Tool Support | 2/2 | Complete | 2026-06-06 |
-| 4. SSE State Machine | 0/2 | Not started | - |
-| 5. Route Integration | 0/0 | Not started | - |
-| 6. Testing & Release | 0/0 | Not started | - |
+| 4. SSE State Machine | 2/2 | Complete | 2026-06-07 |
+| 5. Route Integration | 1/1 | Complete | 2026-06-07 |
+| 6. Testing & Release | 0/4 | Planning | - |
