@@ -11,7 +11,7 @@
 - [x] **Phase 3: Tool Support** - 工具格式转换与 Schema 自动修复 (completed 2026-06-06)
 - [x] **Phase 4: SSE State Machine** - 流式事件翻译（文本/推理/工具调用/类型转换）
 - [x] **Phase 5: Route Integration** - HTTP handler、认证透传、压缩端点
-- [ ] **Phase 6: Testing & Release** - 全面测试、文档更新、版本发布 v2.0.0
+- [x] **Phase 6: Testing & Release** - 全面测试、文档更新、版本发布 v2.0.0 (completed 2026-06-07)
 
 ## Phase Details
 
@@ -111,7 +111,7 @@ Plans:
 - [x] 06-01-PLAN.md — Test Coverage Expansion (__main__.py + proxy.py coverage gap tests)
 - [x] 06-02-PLAN.md — E2E Tests & Test Refactor
 - [x] 06-03-PLAN.md — Documentation & CI (README/CHANGELOG/codex-integration + CI improvements)
-- [ ] 06-04-PLAN.md — Version & Release (bump to 2.0.0 + regression + release guide)
+- [x] 06-04-PLAN.md — Version & Release (bump to 2.0.0 + regression + release guide)
 
 ## Progress
 
@@ -122,4 +122,4 @@ Plans:
 | 3. Tool Support | 2/2 | Complete | 2026-06-06 |
 | 4. SSE State Machine | 2/2 | Complete | 2026-06-07 |
 | 5. Route Integration | 1/1 | Complete | 2026-06-07 |
-| 6. Testing & Release | 3/4 | In Progress|  |
+| 6. Testing & Release | 4/4 | Complete   | 2026-06-07 |
