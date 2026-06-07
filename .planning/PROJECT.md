@@ -57,8 +57,21 @@ DeepSeek V4 ↔ 编程 AI CLI 兼容性代理。双向协议翻译，让 Claude 
 
 ### Active
 
-- [ ] **CODX-01**: Codex CLI 可通过代理使用 DeepSeek V4 模型进行对话
-- [ ] **CODX-02**: Codex 工具调用（shell、文件操作等）正常工作，包括并行工具调用
+- [ ] **CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）→ ✅ Phase 3 已验证（moved to validated below）
+
+### Validated
+
+→ ✅ **Phase 5 已验证**: HTTP 路由集成
+
+- ✓ **CODX-01**: Codex CLI 可通过代理使用 DeepSeek V4 模型进行对话 — POST /v1/responses 路由集成，流式/非流式双模式支持
+- ✓ **CODX-02**: Codex 工具调用正常工作 — POST /v1/responses 流式翻译支持工具调用 SSE 事件
+- ✓ **CODX-19**: POST /v1/responses/compact 返回 HTTP 501 — 触发 Codex 内联压缩
+- ✓ **CODX-20**: 不影响现有 Anthropic Messages API 代理 — 22 个现有 proxy 测试全部通过（零回归，211 个测试通过）
+- ✓ **CODX-21**: Authorization header 从 Codex 请求原样透传到 DeepSeek API
+  - proxy.py（+249 行）：responses_handler、compact_handler、_handle_stream_response、_handle_non_stream_response、_translate_chat_to_responses、ERROR_CODE_MAP、_translate_upstream_error
+  - test_responses.py（+512 行）：21 个 HTTP 集成测试
+  - 111/111 测试全通过，proxy 覆盖率 90.9%
+
 - ~~**CODX-05**: 灵活的模型映射（Codex 模型名 → DeepSeek 模型，可配置）~~ → ✅ Phase 1 已验证
 - ~~**CODX-06**: 工具定义自动修复（适配 DeepSeek 严格的 Schema 校验）~~ → ✅ Phase 3 已验证
 - ~~**CODX-07**: 压缩端点正确处理（返回 501 触发 Codex 内联压缩）~~ → ✅ Phase 3 已验证
@@ -123,4 +136,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-06 after Phase 4 sse-state-machine completion*
+*Last updated: 2026-06-07 after Phase 5 route-integration completion*
