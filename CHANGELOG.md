@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-06-07
+
+### Added
+- Codex 子包（config.py / translate.py / tools.py / sse.py）— OpenAI Responses API 协议翻译
+- proxy Codex handler（/v1/responses 和 /v1/responses/compact 路由）
+- E2E 集成测试（tests/test_e2e.py）
+- __main__.py CLI 测试（tests/test_main.py）
+- 技术文档 docs/dev/codex-integration.md
+- CI 覆盖率徽章生成
+- PyPI OIDC Trusted Publishing 发布
+- Docker semver sha 标签
+
+### Changed
+- 版本升至 2.0.0（Codex 双协议支持 — MAJOR 版本）
+- README / README.zh-CN.md 增加 Codex 支持章节
+- CI 全面运行 `pytest tests/ -v`（全量测试）
+- CI 中 PyPI 发布从 API token 切换为 OIDC
+- 测试重构消除冗余，改善组织
+
 ## [1.8.1] - 2026-05-23
 
 ### Fixed
