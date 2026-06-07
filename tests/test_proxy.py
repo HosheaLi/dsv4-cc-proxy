@@ -230,3 +230,74 @@ def test_thinking_requested():
     assert not _thinking_requested({"thinking": {"type": "disabled"}})
     assert not _thinking_requested({"thinking": {"type": "adaptive"}})
     assert not _thinking_requested({})
+
+
+# === proxy.py 边缘情况补充 ===
+
+
+def test_thinking_requested_non_dict():
+    """thinking 配置不是 dict -> False。"""
+    assert not _thinking_requested({"thinking": "enabled"})
+
+
+def test_thinking_requested_no_thinking_key():
+    """data 中无 thinking 键 -> False。"""
+    assert not _thinking_requested({"model": "deepseek-v4-pro"})
+
+
+def test_thinking_requested_empty_data():
+    """空 data -> False。"""
+    assert not _thinking_requested({})
+
+
+def test_normalize_thinking_no_messages_key():
+    """data 无 messages 键 -> True（thinking 被修改）。"""
+    data = {"thinking": {"type": "adaptive"}}
+    assert _normalize_thinking(data)
+    assert data["thinking"]["type"] == "disabled"
+
+
+def test_normalize_thinking_unknown_type():
+    """未知 thinking type -> 转换为 disabled。"""
+    data = {"thinking": {"type": "auto"}, "messages": [{"role": "user", "content": "hi"}]}
+    assert _normalize_thinking(data)
+    assert data["thinking"]["type"] == "disabled"
+
+
+def test_inject_thinking_blocks_non_dict_thinking():
+    """thinking 不是 dict -> False。"""
+    data = {
+        "thinking": "enabled",
+        "model": "deepseek-v4-pro",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {}}
+            ]}
+        ],
+    }
+    assert not _inject_thinking_blocks(data)
+
+
+def test_inject_thinking_blocks_no_messages():
+    """无 messages -> False。"""
+    data = {"thinking": {"type": "enabled"}, "model": "deepseek-v4-pro"}
+    assert not _inject_thinking_blocks(data)
+
+
+def test_filter_sse_thinking_delta_wrong_index():
+    """thinking_delta 但 index 不在 thinking_indices 中 -> 透传。"""
+    line = (
+        'data: {"type":"content_block_delta","index":0,'
+        '"delta":{"type":"thinking_delta","thinking":"Hello"}}'
+    )
+    result, indices = _filter_sse_line(line, set())
+    assert result == line
+    assert indices == set()
+
+
+def test_filter_sse_content_block_stop_tracking():
+    """content_block_stop 正确从 thinking_indices 清除 index。"""
+    line = 'data: {"type":"content_block_stop","index":0}'
+    result, indices = _filter_sse_line(line, {0})
+    assert result is None
+    assert 0 not in indices

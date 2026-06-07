@@ -688,3 +688,109 @@ class TestProxyConnectionError:
         body = resp.json()
         assert body["error"]["type"] == "proxy_error"
         assert "upstream unavailable" in body["error"]["message"]
+
+
+class TestProxyThinkingEnabled:
+    """proxy() handler 中 thinking enabled 路径覆盖（body 修改 + strip_thinking=False）。"""
+
+    def test_passthrough_with_thinking_enabled(self, client):
+        """thinking enabled + tool_use -> body 被修改 + passthrough。"""
+        mock_resp = _MockJSONResponse(status_code=200, json_data={
+            "id": "chat-think",
+            "choices": [{"message": {"content": "OK"}}],
+        })
+
+        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
+            mock_get_client.return_value = _make_mock_client(mock_resp)
+
+            resp = client.post("/v1/messages", json={
+                "model": "deepseek-v4-pro",
+                "thinking": {"type": "enabled"},
+                "messages": [
+                    {"role": "user", "content": "Use a tool"},
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"cmd": "ls"}},
+                    ]},
+                ],
+            })
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["choices"][0]["message"]["content"] == "OK"
+
+    def test_passthrough_with_thinking_adaptive(self, client):
+        """thinking adaptive -> normalize 修改 body -> passthrough。"""
+        mock_resp = _MockJSONResponse(status_code=200, json_data={
+            "id": "chat-ad",
+            "choices": [{"message": {"content": "Adaptive handled"}}],
+        })
+
+        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
+            mock_get_client.return_value = _make_mock_client(mock_resp)
+
+            resp = client.post("/v1/messages", json={
+                "model": "deepseek-v4-pro",
+                "thinking": {"type": "adaptive"},
+                "messages": [{"role": "user", "content": "Hi"}],
+            })
+
+        assert resp.status_code == 200
+
+
+class TestResponsesConnectionError:
+    """responses_handler 下游 handler 的 httpx 连接失败情况。"""
+
+    def test_stream_handler_connection_error(self, client):
+        """_handle_stream_response 中 client.send 失败 -> 502 proxy_error。"""
+        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
+            mock_client = AsyncMock(spec=httpx.AsyncClient)
+            mock_client.build_request.return_value = MagicMock(spec=httpx.Request)
+            mock_client.send.side_effect = httpx.ConnectError("Connection refused")
+            mock_get_client.return_value = mock_client
+
+            resp = client.post("/v1/responses", json={
+                "model": "gpt-5",
+                "input": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            })
+
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["error"]["type"] == "proxy_error"
+
+    def test_non_stream_handler_connection_error(self, client):
+        """_handle_non_stream_response 中 client.send 失败 -> 502 proxy_error。"""
+        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
+            mock_client = AsyncMock(spec=httpx.AsyncClient)
+            mock_client.build_request.return_value = MagicMock(spec=httpx.Request)
+            mock_client.send.side_effect = httpx.ConnectError("Connection refused")
+            mock_get_client.return_value = mock_client
+
+            resp = client.post("/v1/responses", json={
+                "model": "gpt-5",
+                "input": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            })
+
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["error"]["type"] == "proxy_error"
+
+
+class TestResponsesTranslationError:
+    """responses_handler 中 translate_request 失败的情况。"""
+
+    def test_translate_request_error(self, client):
+        """translate_request 抛出异常 -> 400 invalid_request_error。"""
+        with patch("dsv4_cc_proxy.proxy.translate_request") as mock_translate:
+            mock_translate.side_effect = ValueError("Invalid request format")
+
+            resp = client.post("/v1/responses", json={
+                "model": "gpt-5",
+                "input": [{"role": "user", "content": "Hello"}],
+            })
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"]["type"] == "invalid_request_error"
+        assert body["error"]["code"] == "translation_failed"
