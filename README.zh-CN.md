@@ -230,7 +230,7 @@ pytest tests/ -v
 
 ```bash
 curl http://localhost:16889/health
-# → {"status":"ok","version":"1.8.0","upstream":"https://api.deepseek.com/anthropic"}
+# → {"status":"ok","version":"2.0.0","upstream":"https://api.deepseek.com/anthropic"}
 ```
 
 ## 目录结构

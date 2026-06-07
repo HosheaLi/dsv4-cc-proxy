@@ -189,7 +189,7 @@ def test_version_importable():
     """VERSION 可导入。"""
     from dsv4_cc_proxy._version import VERSION
 
-    assert VERSION == "1.8.0"
+    assert VERSION == "2.0.0"
 
 
 def test_stop_pidfile_corrupted(monkeypatch, tmp_path):
