@@ -17,6 +17,7 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 [![CI](https://github.com/HosheaLi/dsv4-cc-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/HosheaLi/dsv4-cc-proxy/actions)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
 [![Docker Pulls](https://img.shields.io/docker/pulls/hosheali/dsv4-cc-proxy)](https://hub.docker.com/r/hosheali/dsv4-cc-proxy)
+[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)](coverage.svg)
 
 </div>
 
@@ -33,6 +34,39 @@ DeepSeek V4 implements the Anthropic API format, but has 3 critical incompatibil
 | 3 | `thinking.type=adaptive` (Claude Code default) + `reasoning_effort` not supported by DeepSeek | Stream truncation / 400 errors | Normalize to `disabled` + strip reasoning_effort |
 
 Non-DeepSeek requests and non-`/messages` endpoints pass through with zero overhead.
+
+## Codex Support
+
+dsv4-cc-proxy also translates between the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) format and DeepSeek's Chat Completions API, enabling Codex (and other OpenAI Responses API clients) to use DeepSeek V4 models.
+
+```
+Codex (Claude Code) ──→ localhost:16889 ──→ https://api.deepseek.com/chat/completions
+```
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/responses` | Translate Responses API requests to Chat Completions, then translate responses back |
+| `POST /v1/responses/compact` | Not supported — returns 501 |
+
+### Environment Variables
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `CODEX_DEFAULT_MODEL` | `deepseek-v4-pro` | Default model for Codex requests |
+| `CODEX_MODEL_MAP` | `{}` | JSON map of client model names to DeepSeek model names (e.g., `{"claude-sonnet-4-6": "deepseek-v4-pro"}`) |
+| `CODEX_UPSTREAM` | `https://api.deepseek.com/chat/completions` | DeepSeek Chat Completions API URL |
+
+### Usage
+
+Point Codex to the same proxy URL:
+
+```json
+"OPENAI_BASE_URL": "http://localhost:16889"
+```
+
+The proxy auto-detects Responses API requests (`/v1/responses`) and applies the appropriate translation. All existing Anthropic API proxy features remain unchanged.
 
 ## Quick Start
 
@@ -96,6 +130,8 @@ Point Claude Code to the proxy by adding to your `settings.local.json`:
 | `PROXY_PORT` | `16889` | Bind port |
 | `PROXY_LOG_LEVEL` | `warning` | Log level (`info` for debugging) |
 | `PROXY_DUMP_DIR` | *(empty=off)* | Debug traffic dump directory. ⚠ Contains conversation data |
+
+> For Codex usage, see the [Codex Support](#codex-support) section above.
 
 ## Comparison
 
@@ -206,10 +242,22 @@ curl http://localhost:16889/health
 ├── dsv4_cc_proxy/
 │   ├── __init__.py                  # Package entry, exports VERSION + create_app
 │   ├── __main__.py                  # CLI entry — dsv4-cc-proxy command
-│   ├── _version.py                  # VERSION = "1.8.0" (single source of truth)
-│   └── proxy.py                     # Core proxy logic (factory pattern)
+│   ├── _version.py                  # VERSION = "2.0.0" (single source of truth)
+│   ├── proxy.py                     # Core proxy logic (factory pattern)
+│   └── codex/                       # Codex (Responses API) protocol translation
+│       ├── __init__.py
+│       ├── config.py
+│       ├── translate.py
+│       ├── tools.py
+│       └── sse.py
 ├── tests/
-│   └── test_proxy.py                # 22 unit tests
+│   ├── test_proxy.py                # 22 unit tests
+│   ├── test_codex.py                # Codex config tests
+│   ├── test_translate.py            # Request translation tests
+│   ├── test_tools.py                # Tool format conversion tests
+│   ├── test_sse.py                  # SSE streaming tests
+│   ├── test_main.py                 # CLI tests
+│   └── test_responses.py            # Codex HTTP route tests
 ├── scripts/
 │   ├── start.bat                    # Windows batch startup
 │   ├── start.ps1                    # PowerShell startup
