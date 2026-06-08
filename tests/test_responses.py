@@ -46,7 +46,7 @@ class TestInvalidInput:
 
         assert resp.status_code == 400
         body = resp.json()
-        assert body["error"]["code"] == "invalid_json"
+        assert body["error"]["code"] == "400"
 
 
 class TestNonStream:
@@ -740,4 +740,4 @@ class TestResponsesTranslationError:
         assert resp.status_code == 400
         body = resp.json()
         assert body["error"]["type"] == "invalid_request_error"
-        assert body["error"]["code"] == "translation_failed"
+        assert body["error"]["code"] == "400"

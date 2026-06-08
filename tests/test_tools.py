@@ -234,10 +234,10 @@ def test_recursive_via_items():
 
 
 def test_unknown_type_passes_through():
-    """验证未知 type 字段原样通过。"""
+    """验证非 function 类型工具被过滤（DeepSeek 只支持 function 类型）。"""
     body = [{"type": "custom_type", "data": "test"}]
     result = codex_tools.convert_tools(body)
-    assert result[0] == body[0]
+    assert len(result) == 0
 
 
 def test_missing_parameters_skips_schema_repair():
@@ -258,18 +258,16 @@ def test_tool_with_strict_field():
 
 
 def test_unknown_tool_type_preserved():
-    """验证混合工具列表中已知/未知类型工具正确处理。"""
+    """验证混合工具列表中非 function 类型被过滤，function 类型正常转换。"""
     body = [
         {"type": "function", "name": "fn", "parameters": {"type": "object"}},
         {"type": "unknown_type_named_xyz"},
     ]
     result = codex_tools.convert_tools(body)
-    assert len(result) == 2
+    assert len(result) == 1
     # function 工具正常转换
     assert "function" in result[0]
     assert result[0]["function"]["name"] == "fn"
-    # 未知类型原样通过
-    assert result[1] == body[1]
 
 
 # =============================================================================
@@ -295,11 +293,11 @@ def test_invalid_parameters_none_skipped():
 
 
 def test_non_dict_tool_skipped():
-    """验证非 dict 元素被跳过，不抛出异常。"""
+    """验证非 dict 元素被跳过并从输出中排除，不抛出异常。"""
     result = codex_tools.convert_tools([
         {"type": "function", "name": "good", "parameters": {"type": "object"}},
         "not_a_dict",
     ])
-    assert len(result) == 2
+    assert len(result) == 1
     assert "function" in result[0]
     assert result[0]["function"]["name"] == "good"

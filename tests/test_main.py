@@ -201,6 +201,7 @@ def test_stop_pidfile_corrupted(monkeypatch, tmp_path):
 
     from dsv4_cc_proxy.__main__ import main
 
-    # PID 文件内容非法时 _stop 中 int() 抛出 ValueError
-    with pytest.raises(ValueError, match="invalid literal for int()"):
+    # _stop 中 int() 失败后显式调用 sys.exit(1)
+    with pytest.raises(SystemExit) as exc_info:
         main()
+    assert exc_info.value.code == 1
