@@ -18,9 +18,34 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator, AsyncIterable
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 logger = logging.getLogger("deepseek-proxy")
+
+
+@dataclass
+class _ToolCallState:
+    """追踪翻译过程中活跃工具调用的所有状态。
+
+    封装原本作为独立 dict 存在的 6 个映射，使得
+    _close_active_tool_calls 和类型转换逻辑更清晰。
+    """
+
+    active_indices: set[int] = field(default_factory=set)
+    call_ids: dict[int, str] = field(default_factory=dict)
+    names: dict[int, str] = field(default_factory=dict)
+    arguments: dict[int, str] = field(default_factory=dict)
+    item_ids: dict[int, str] = field(default_factory=dict)
+    output_indices: dict[int, int] = field(default_factory=dict)
+
+    def clear(self) -> None:
+        self.active_indices.clear()
+        self.call_ids.clear()
+        self.names.clear()
+        self.arguments.clear()
+        self.item_ids.clear()
+        self.output_indices.clear()
 
 
 # ---- SSE 事件构建底层工具 ----
@@ -320,14 +345,7 @@ def _build_response_completed(
 # ---- 内部辅助：关闭活跃工具调用 ----
 
 
-def _close_active_tool_calls(
-    active_tool_indices: set[int],
-    tool_call_ids: dict[int, str],
-    tool_call_names: dict[int, str],
-    tool_call_arguments: dict[int, str],
-    tool_call_item_ids: dict[int, str],
-    tool_call_output_indices: dict[int, int],
-) -> list[str]:
+def _close_active_tool_calls(state: _ToolCallState) -> list[str]:
     """关闭所有活跃工具调用，返回 SSE 事件行列表。
 
     每个工具调用依次产生两个事件:
@@ -335,23 +353,18 @@ def _close_active_tool_calls(
     2. output_item.done — 工具调用完成状态
 
     Args:
-        active_tool_indices: 当前活跃的工具调用 index 集合。
-        tool_call_ids: index → call_id 映射。
-        tool_call_names: index → name 映射。
-        tool_call_arguments: index → 累计 arguments 映射。
-        tool_call_item_ids: index → item_id 映射。
-        tool_call_output_indices: index → output_index 映射。
+        state: 工具调用状态 dataclass，封装 6 个映射。
 
     Returns:
         SSE 事件字符串列表。
     """
     events: list[str] = []
-    for idx in sorted(active_tool_indices):
-        call_id = tool_call_ids[idx]
-        item_id = tool_call_item_ids[idx]
-        output_idx = tool_call_output_indices[idx]
-        accumulated = tool_call_arguments[idx]
-        name = tool_call_names[idx]
+    for idx in sorted(state.active_indices):
+        call_id = state.call_ids[idx]
+        item_id = state.item_ids[idx]
+        output_idx = state.output_indices[idx]
+        accumulated = state.arguments[idx]
+        name = state.names[idx]
         events.append(
             _build_function_call_arguments_done(item_id, call_id, output_idx, accumulated),
         )
@@ -387,7 +400,7 @@ async def translate_sse_stream(
 
     状态追踪:
         current_output_type: None | "reasoning" | "text" | "tool_call"
-        active_tool_indices: set[int] — 活跃工具调用 index 集合
+        tc_state: _ToolCallState — 工具调用状态 dataclass
 
     事件生命周期 (CODX-06):
         1. response.created — 响应开始
@@ -399,7 +412,7 @@ async def translate_sse_stream(
     """
     # 状态追踪（D-06 隐式状态）
     current_output_type: str | None = None  # None | "reasoning" | "text" | "tool_call"
-    active_tool_indices: set[int] = set()   # D-07: 追踪活跃 tool_call indices
+    tc_state = _ToolCallState()             # D-07: 追踪活跃 tool_call indices
     is_first_chunk = True
     _completed = False                       # D-08: finish_reason 幂等保护
     sequence = 0                             # 递增序列号
@@ -416,13 +429,6 @@ async def translate_sse_stream(
     reasoning_output_index: int = 0
     text_item_id: str | None = None
     text_output_index: int = 0
-    tool_call_item_ids: dict[int, str] = {}       # index -> item_id
-    tool_call_output_indices: dict[int, int] = {} # index -> output_index
-
-    # 工具调用追踪（每个 index 独立）
-    tool_call_ids: dict[int, str] = {}            # index -> call_id
-    tool_call_names: dict[int, str] = {}          # index -> name
-    tool_call_arguments: dict[int, str] = {}      # index -> 累计 arguments
 
     model_name = "deepseek-v4-pro"
 
@@ -454,19 +460,10 @@ async def translate_sse_stream(
                 if current_output_type is not None and current_output_type != "reasoning":
                     # 类型转换：关闭当前 item
                     if current_output_type == "tool_call":
-                        events = _close_active_tool_calls(
-                            active_tool_indices, tool_call_ids, tool_call_names,
-                            tool_call_arguments, tool_call_item_ids,
-                            tool_call_output_indices,
-                        )
+                        events = _close_active_tool_calls(tc_state)
                         for event in events:
                             yield event
-                        active_tool_indices.clear()
-                        tool_call_ids.clear()
-                        tool_call_names.clear()
-                        tool_call_arguments.clear()
-                        tool_call_item_ids.clear()
-                        tool_call_output_indices.clear()
+                        tc_state.clear()
                     elif current_output_type == "text":
                         yield _build_output_item_done(
                             text_output_index, "message", text_item_id,
@@ -506,19 +503,10 @@ async def translate_sse_stream(
                 if current_output_type is not None and current_output_type != "text":
                     # 类型转换：关闭当前 item
                     if current_output_type == "tool_call":
-                        events = _close_active_tool_calls(
-                            active_tool_indices, tool_call_ids, tool_call_names,
-                            tool_call_arguments, tool_call_item_ids,
-                            tool_call_output_indices,
-                        )
+                        events = _close_active_tool_calls(tc_state)
                         for event in events:
                             yield event
-                        active_tool_indices.clear()
-                        tool_call_ids.clear()
-                        tool_call_names.clear()
-                        tool_call_arguments.clear()
-                        tool_call_item_ids.clear()
-                        tool_call_output_indices.clear()
+                        tc_state.clear()
                     elif current_output_type == "reasoning":
                         yield _build_output_item_done(
                             reasoning_output_index, "reasoning",
@@ -561,7 +549,7 @@ async def translate_sse_stream(
                 for tc in tool_calls:
                     idx = tc.get("index")
 
-                    if idx not in active_tool_indices:
+                    if idx not in tc_state.active_indices:
                         # 新工具调用 (D-07)
                         # 如果当前有 text 或 reasoning item，先关闭
                         if current_output_type == "text":
@@ -589,31 +577,31 @@ async def translate_sse_stream(
                         call_id = tc.get("id", f"call_{idx}")
                         name = tc.get("function", {}).get("name", "unknown")
 
-                        active_tool_indices.add(idx)
-                        tool_call_ids[idx] = call_id
-                        tool_call_names[idx] = name
-                        tool_call_arguments[idx] = ""
+                        tc_state.active_indices.add(idx)
+                        tc_state.call_ids[idx] = call_id
+                        tc_state.names[idx] = name
+                        tc_state.arguments[idx] = ""
 
                         item_id_counter += 1
-                        tool_call_item_ids[idx] = f"fc_{item_id_counter}"
+                        tc_state.item_ids[idx] = f"fc_{item_id_counter}"
                         output_counter += 1
-                        tool_call_output_indices[idx] = output_counter
+                        tc_state.output_indices[idx] = output_counter
 
                         yield _build_output_item_added(
                             output_counter, "function_call",
                             name=name, call_id=call_id,
-                            item_id=tool_call_item_ids[idx],
+                            item_id=tc_state.item_ids[idx],
                         )
                         current_output_type = "tool_call"
 
                     # 收获 arguments 片段（含首次空字符串）
                     arg_fragment = tc.get("function", {}).get("arguments", "")
-                    tool_call_arguments[idx] += arg_fragment
+                    tc_state.arguments[idx] += arg_fragment
 
                     sequence += 1
                     yield _build_function_call_arguments_delta(
-                        tool_call_item_ids[idx], tool_call_ids[idx],
-                        tool_call_output_indices[idx], arg_fragment, sequence,
+                        tc_state.item_ids[idx], tc_state.call_ids[idx],
+                        tc_state.output_indices[idx], arg_fragment, sequence,
                     )
                     logger.debug(
                         "[CODEX] Delta: tool_call idx=%s (%d chars)",
@@ -623,20 +611,11 @@ async def translate_sse_stream(
             # ---- finish_reason 处理 ----
             if finish_reason:
                 # 关闭所有活跃工具调用
-                if active_tool_indices:
-                    events = _close_active_tool_calls(
-                        active_tool_indices, tool_call_ids, tool_call_names,
-                        tool_call_arguments, tool_call_item_ids,
-                        tool_call_output_indices,
-                    )
+                if tc_state.active_indices:
+                    events = _close_active_tool_calls(tc_state)
                     for event in events:
                         yield event
-                    active_tool_indices.clear()
-                    tool_call_ids.clear()
-                    tool_call_names.clear()
-                    tool_call_arguments.clear()
-                    tool_call_item_ids.clear()
-                    tool_call_output_indices.clear()
+                    tc_state.clear()
 
                 # 关闭当前 text 或 reasoning item
                 if current_output_type == "text" and text_item_id:

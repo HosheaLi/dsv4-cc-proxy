@@ -31,23 +31,27 @@ REMOVED_KEYS = frozenset({
 # ---- 内部辅助函数 ----
 
 
-def _convert_tool_format(tool: dict) -> dict:
+def _convert_tool_format(tool: dict) -> dict | None:
     """扁平工具格式 → 嵌套格式转换。
 
     处理:
     - 已嵌套（有 function 键）→ 原样通过
-    - 未知 type → WARNING + 原样透传
+    - 非 function 类型（namespace/web_search 等）→ 过滤掉（DeepSeek 不支持）
     - function type 扁平 → {type, function: {name, desc, params, strict}}
+
+    Returns:
+        转换后的工具字典，或 None 表示应过滤掉。
     """
     # 1. 若已有 "function" 键 → 直接返回（D-08 已嵌套处理）
     if "function" in tool:
         return tool
 
-    # 2. 未知 type 记录 WARNING 并原样透传
+    # 2. 非 function 类型 → 过滤（DeepSeek 只接受 function 类型工具）
     tool_type = tool.get("type", "")
     if tool_type != "function":
-        logger.warning("[CODEX] unknown tool type: %s, passing through", tool_type)
-        return tool
+        tool_name = tool.get("name", "?")
+        logger.info("[CODEX] dropping unsupported tool type '%s' (name=%s)", tool_type, tool_name)
+        return None
 
     # 3. function type 扁平格式 → 嵌套包装
     #    需要移到 function 下的键: name, description, parameters, strict
@@ -124,14 +128,18 @@ def convert_tools(tools: list[dict]) -> list[dict]:
         return []
 
     result = copy.deepcopy(tools)
+    kept = []
 
     for i, tool in enumerate(result):
         if not isinstance(tool, dict):
             logger.warning("[CODEX] non-dict tool at index %d, skipping", i)
             continue
 
-        # 格式转换
+        # 格式转换（None 表示过滤掉）
         converted = _convert_tool_format(tool)
+        if converted is None:
+            continue
+        kept.append(converted)
 
         # Schema 修复（在 function 内的 parameters 或顶层的 parameters）
         params = converted.get("parameters")
@@ -157,4 +165,4 @@ def convert_tools(tools: list[dict]) -> list[dict]:
                     f"expected dict, got {type(params).__name__}"
                 )
 
-    return result
+    return kept

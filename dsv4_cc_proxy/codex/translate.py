@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from typing import Any
 
 from dsv4_cc_proxy.codex.config import CODEX_DEFAULT_MODEL, CODEX_UPSTREAM, resolve_model
 from dsv4_cc_proxy.codex.tools import convert_tools
@@ -53,8 +54,8 @@ def _extract_content_text(content: str | list | None) -> str | None:
 
 def _merge_system_messages(
     instructions: str | None,
-    developer_messages: list[dict],
-) -> dict | None:
+    developer_messages: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     """合并 instructions 和 developer role 消息为一条 system 消息。
 
     如果两者皆空则返回 None。非空时用 \n\n 连接各部分。
@@ -71,7 +72,7 @@ def _merge_system_messages(
     return {"role": "system", "content": "\n\n".join(parts)}
 
 
-def _translate_input_items(input_array: list) -> list[dict]:
+def _translate_input_items(input_array: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """将 Responses API input 数组翻译为 Chat Completions messages 列表。
 
     处理 item 类型:
@@ -81,7 +82,7 @@ def _translate_input_items(input_array: list) -> list[dict]:
     - reasoning → 折叠到后续 assistant 的 reasoning_content
     - 未知类型 → WARNING + 跳过
     """
-    messages: list[dict] = []
+    messages: list[dict[str, Any]] = []
     pending_reasoning: list[str] = []
 
     for item in input_array:
@@ -192,7 +193,7 @@ def _translate_input_items(input_array: list) -> list[dict]:
     return messages
 
 
-def _ensure_reasoning_content(messages: list[dict]) -> None:
+def _ensure_reasoning_content(messages: list[dict[str, Any]]) -> None:
     """后处理：确保有 tool_calls 的 assistant 消息包含 reasoning_content。
 
     DeepSeek 要求：assistant 消息有 tool_calls 时必须同时有 reasoning_content 字段。
@@ -209,7 +210,7 @@ def _ensure_reasoning_content(messages: list[dict]) -> None:
 # ---- 公开 API ----
 
 
-def translate_request(request_body: dict) -> dict:
+def translate_request(request_body: dict[str, Any]) -> dict[str, Any]:
     """将 Responses API 请求体翻译为 Chat Completions 请求体。
 
     Pure function: 不修改输入（deepcopy 保护）。
@@ -247,8 +248,8 @@ def translate_request(request_body: dict) -> dict:
     input_array = body.pop("input", [])
 
     # 2. 分离 developer 消息
-    developer_msgs: list[dict] = []
-    other_items: list[dict] = []
+    developer_msgs: list[dict[str, Any]] = []
+    other_items: list[dict[str, Any]] = []
     for item in input_array:
         if (
             isinstance(item, dict)

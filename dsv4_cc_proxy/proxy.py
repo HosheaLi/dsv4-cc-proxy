@@ -20,9 +20,11 @@ import logging.handlers
 import os
 import sys
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
@@ -35,11 +37,16 @@ from dsv4_cc_proxy.codex.translate import translate_request
 
 DEEPSEEK_BASE = os.getenv("PROXY_UPSTREAM", "https://api.deepseek.com/anthropic")
 HOST = os.getenv("PROXY_HOST", "127.0.0.1")
-try:
-    PORT = int(os.getenv("PROXY_PORT", "16889"))
-except (TypeError, ValueError):
-    print("Error: PROXY_PORT must be an integer", file=sys.stderr)
-    sys.exit(1)
+def _get_port() -> int:
+    """惰性解析 PORT 环境变量，避免模块级 import 时触发 sys.exit。"""
+    try:
+        return int(os.getenv("PROXY_PORT", "16889"))
+    except (TypeError, ValueError):
+        logger.critical("Error: PROXY_PORT must be an integer")
+        sys.exit(1)
+
+
+_PORT: int | None = None  # 惰性初始化缓存
 LOG_LEVEL = os.getenv("PROXY_LOG_LEVEL", "warning")
 DUMP_DIR = os.getenv("PROXY_DUMP_DIR", "")
 
@@ -92,7 +99,7 @@ def _get_client() -> httpx.AsyncClient:
 # ---- 健康检查 ----
 
 
-async def health(request):
+async def health(request: Request):
     return JSONResponse({
         "status": "ok",
         "version": VERSION,
@@ -197,7 +204,7 @@ def _thinking_requested(data: dict) -> bool:
     )
 
 
-def _filter_sse_line(line: str, thinking_indices: set) -> tuple:
+def _filter_sse_line(line: str, thinking_indices: set[int]) -> tuple[str | None, set[int]]:
     if not line.startswith("data: "):
         return line, thinking_indices
 
@@ -231,19 +238,21 @@ if DUMP_DIR:
     logger.warning("⚠ PROXY_DUMP_DIR enabled — data saved to %s", DUMP_DIR)
 
 
-def _dump_json(filename: str, data):
+def _dump_json(filename: str, data: Any) -> None:
     if not DUMP_DIR:
         return
     path = os.path.join(DUMP_DIR, filename)
     s = json.dumps(data, ensure_ascii=False, indent=2, default=str)
     if len(s) > DUMP_MAX_BYTES:
-        s = s[:DUMP_MAX_BYTES] + "\n\n... [TRUNCATED at {}KB]".format(DUMP_MAX_BYTES // 1000)
+        # 在字节边界安全截断，避免破坏多字节 Unicode 字符
+        prefix = s.encode("utf-8", errors="ignore")[:DUMP_MAX_BYTES]
+        s = prefix.decode("utf-8", errors="ignore") + "\n\n... [TRUNCATED at {}KB]".format(DUMP_MAX_BYTES // 1000)
     with open(path, "w") as f:
         f.write(s)
     logger.info("[DUMP] %s (%d bytes)", filename, len(s))
 
 
-def _summarize_request(data: dict) -> dict:
+def _summarize_request(data: dict[str, Any]) -> dict[str, Any]:
     msgs = data.get("messages", [])
     tools = data.get("tools", [])
     system = data.get("system", "")
@@ -267,7 +276,7 @@ def _summarize_request(data: dict) -> dict:
 # ---- 请求处理 ----
 
 
-def _build_response_headers(upstream_resp, is_sse: bool) -> dict:
+def _build_response_headers(upstream_resp: httpx.Response, is_sse: bool) -> dict[str, str]:
     strip_keys = {"transfer-encoding", "content-encoding"}
     if is_sse:
         strip_keys.add("content-length")
@@ -277,7 +286,7 @@ def _build_response_headers(upstream_resp, is_sse: bool) -> dict:
     }
 
 
-async def proxy(request):
+async def proxy(request: Request):
     method = request.method
     path = "/" + request.url.path.lstrip("/")
     upstream_url = f"{DEEPSEEK_BASE}{path}"
@@ -431,10 +440,10 @@ ERROR_CODE_MAP = {
 }
 
 
-def _build_error(status_code: int, error_type: str, code: str, message: str) -> JSONResponse:
+def _build_error(status_code: int, error_type: str, message: str) -> JSONResponse:
     """构建 Responses API 标准错误响应。"""
     return JSONResponse(
-        {"error": {"type": error_type, "code": code, "message": message, "param": None}},
+        {"error": {"type": error_type, "code": str(status_code), "message": message, "param": None}},
         status_code=status_code,
     )
 
@@ -548,8 +557,7 @@ async def _handle_stream_response(chat_request: dict, headers: dict, upstream_ur
         upstream_resp = await client.send(req, stream=True)
     except Exception:
         logger.exception("[CODEX] upstream request failed")
-        return _build_error(502, "proxy_error", "upstream_unavailable",
-                           "Failed to reach DeepSeek API")
+        return _build_error(502, "proxy_error", "Failed to reach DeepSeek API")
 
     if upstream_resp.status_code != 200:
         body = b""
@@ -596,8 +604,7 @@ async def _handle_non_stream_response(chat_request: dict, headers: dict, upstrea
         upstream_resp = await client.send(req, stream=False)
     except Exception:
         logger.exception("[CODEX] upstream request failed")
-        return _build_error(502, "proxy_error", "upstream_unavailable",
-                           "Failed to reach DeepSeek API")
+        return _build_error(502, "proxy_error", "Failed to reach DeepSeek API")
 
     if upstream_resp.status_code != 200:
         body = getattr(upstream_resp, 'content', b"")
@@ -611,15 +618,14 @@ async def _handle_non_stream_response(chat_request: dict, headers: dict, upstrea
     return JSONResponse(response_body, status_code=200)
 
 
-async def responses_handler(request):
+async def responses_handler(request: Request):
     """POST /v1/responses -- Codex CLI 协议代理入口。"""
     logger.info("[CODEX] POST /v1/responses")
 
     try:
         request_body = await request.json()
     except json.JSONDecodeError:
-        return _build_error(400, "invalid_request_error", "invalid_json",
-                           "Request body is not valid JSON")
+        return _build_error(400, "invalid_request_error", "Request body is not valid JSON")
 
     headers = {
         "content-type": "application/json",
@@ -630,8 +636,7 @@ async def responses_handler(request):
         chat_request = translate_request(request_body)
     except Exception:
         logger.exception("[CODEX] translate_request failed")
-        return _build_error(400, "invalid_request_error", "translation_failed",
-                           "Failed to translate request")
+        return _build_error(400, "invalid_request_error", "Failed to translate request")
 
     upstream_url = f"{CODEX_UPSTREAM}/chat/completions"
 
@@ -642,7 +647,7 @@ async def responses_handler(request):
         return await _handle_non_stream_response(chat_request, headers, upstream_url)
 
 
-async def compact_handler(request):
+async def compact_handler(request: Request):
     """POST /v1/responses/compact -- 暂不支持,返回 501。"""
     logger.info("[CODEX] POST /v1/responses/compact -- 501 not_implemented")
     return JSONResponse(

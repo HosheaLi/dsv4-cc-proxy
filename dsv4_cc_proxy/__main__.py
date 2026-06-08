@@ -2,6 +2,7 @@
 
 
 import argparse
+import logging
 import os
 import signal
 import sys
@@ -10,26 +11,32 @@ import time
 import uvicorn
 
 from dsv4_cc_proxy._version import VERSION
-from dsv4_cc_proxy.proxy import DUMP_DIR, HOST, LOG_LEVEL, PORT
+from dsv4_cc_proxy.proxy import DUMP_DIR, HOST, LOG_LEVEL, _get_port
 
 PIDFILE_DEFAULT = "/tmp/dsv4-cc-proxy.pid"
+
+logger = logging.getLogger("deepseek-proxy")
 
 
 def _stop(pidfile: str):
     """停止代理：读取 PID 文件 → SIGTERM → 等待 → SIGKILL（超时则强制杀）。"""
     if not os.path.exists(pidfile):
-        print(f"Proxy not running (PID file not found: {pidfile})")
+        logger.warning("Proxy not running (PID file not found: %s)", pidfile)
         sys.exit(1)
 
-    with open(pidfile) as f:
-        pid = int(f.read().strip())
+    try:
+        with open(pidfile) as f:
+            pid = int(f.read().strip())
+    except (ValueError, IOError):
+        logger.error("PID file corrupted: %s", pidfile)
+        sys.exit(1)
 
-    print(f"Stopping dsv4-cc-proxy (PID {pid})...")
+    logger.info("Stopping dsv4-cc-proxy (PID %d)...", pid)
 
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        print("Process not found, cleaning up PID file")
+        logger.info("Process not found, cleaning up PID file")
         os.unlink(pidfile)
         return
 
@@ -38,14 +45,14 @@ def _stop(pidfile: str):
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            print("Proxy stopped gracefully")
+            logger.info("Proxy stopped gracefully")
             try:
                 os.unlink(pidfile)
             except FileNotFoundError:
                 pass
             return
 
-    print("Graceful shutdown timed out, sending SIGKILL...")
+    logger.warning("Graceful shutdown timed out, sending SIGKILL...")
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -54,7 +61,7 @@ def _stop(pidfile: str):
         os.unlink(pidfile)
     except FileNotFoundError:
         pass
-    print("Proxy stopped (forced)")
+    logger.info("Proxy stopped (forced)")
 
 
 def main():
@@ -73,6 +80,7 @@ def main():
         return
 
     pidfile = args.pidfile
+    port = _get_port()
 
     # 检查是否已有实例在运行
     if os.path.exists(pidfile):
@@ -80,7 +88,7 @@ def main():
             try:
                 pid = int(f.read().strip())
                 os.kill(pid, 0)
-                print(f"Proxy already running (PID {pid}), use --stop first")
+                logger.warning("Proxy already running (PID %d), use --stop first", pid)
                 sys.exit(1)
             except (OSError, ValueError):
                 os.unlink(pidfile)
@@ -89,14 +97,14 @@ def main():
     with open(pidfile, "w") as f:
         f.write(str(os.getpid()))
 
-    print(f"DeepSeek Thinking Proxy v{VERSION} → {HOST}:{PORT} (PID {os.getpid()})")
+    logger.info("DeepSeek Thinking Proxy v%s → %s:%d (PID %d)", VERSION, HOST, port, os.getpid())
     if DUMP_DIR:
-        print(f"⚠ DUMP mode: {DUMP_DIR}")
+        logger.warning("⚠ DUMP mode: %s", DUMP_DIR)
     try:
         uvicorn.run(
             "dsv4_cc_proxy.proxy:create_app",
             host=HOST,
-            port=PORT,
+            port=port,
             log_level=LOG_LEVEL,
             factory=True,
         )
