@@ -330,6 +330,13 @@ def _build_response_completed(
     """
     if usage is None:
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    else:
+        # 翻译 DeepSeek Chat Completions → OpenAI Responses API 字段名
+        usage = {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
     data = {
         "type": "response.completed",
         "response": {

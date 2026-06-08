@@ -477,6 +477,21 @@ def _translate_upstream_error(status_code: int, body: bytes) -> JSONResponse:
     )
 
 
+def _translate_usage(usage: dict[str, Any] | None) -> dict[str, int]:
+    """将 DeepSeek Chat Completions usage → OpenAI Responses API usage。
+
+    DeepSeek 返回 prompt_tokens/completion_tokens，
+    Codex 期望 input_tokens/output_tokens。
+    """
+    if usage is None:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    return {
+        "input_tokens": usage.get("prompt_tokens", 0),
+        "output_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+
+
 def _translate_chat_to_responses(chat_response: dict, model: str) -> dict:
     """将 Chat Completions JSON -> Responses API JSON (非流式)。"""
     choices = chat_response.get("choices") or [{}]
@@ -525,9 +540,7 @@ def _translate_chat_to_responses(chat_response: dict, model: str) -> dict:
         "model": model,
         "status": "completed",
         "output": output,
-        "usage": chat_response.get("usage", {
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-        }),
+        "usage": _translate_usage(chat_response.get("usage")),
     }
 
 

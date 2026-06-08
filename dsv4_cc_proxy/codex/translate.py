@@ -115,12 +115,14 @@ def _translate_input_items(input_array: list[dict[str, Any]]) -> list[dict[str, 
 
         # ---- function_call type ----
         elif item_type == "function_call":
+            # 使用 .get() 避免 KeyError — Codex 某些上下文中的 item 可能缺少字段
+            call_id = item.get("id") or item.get("call_id", "")
             tool_entry = {
-                "id": item["id"],
+                "id": call_id,
                 "type": "function",
                 "function": {
-                    "name": item["name"],
-                    "arguments": item["arguments"],
+                    "name": item.get("name", "unknown"),
+                    "arguments": item.get("arguments", ""),
                 },
             }
             # 查找前一条 assistant 消息
@@ -144,10 +146,11 @@ def _translate_input_items(input_array: list[dict[str, Any]]) -> list[dict[str, 
 
         # ---- function_call_output type ----
         elif item_type == "function_call_output":
+            # 使用 .get() 避免 KeyError — Codex 某些上下文中的 item 可能缺少字段
             messages.append({
                 "role": "tool",
-                "tool_call_id": item["call_id"],
-                "content": item["output"],
+                "tool_call_id": item.get("call_id", ""),
+                "content": item.get("output", ""),
             })
 
         # ---- reasoning type ----

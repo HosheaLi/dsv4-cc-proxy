@@ -20,7 +20,7 @@ logger = logging.getLogger("deepseek-proxy")
 
 # ---- 配置 ----
 
-CODEX_DEFAULT_MODEL = os.getenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+CODEX_DEFAULT_MODEL = os.getenv("CODEX_DEFAULT_MODEL", "deepseek-v4-pro")
 CODEX_UPSTREAM = os.getenv("CODEX_UPSTREAM", "https://api.deepseek.com/v1")
 _RAW_MODEL_MAP = os.getenv("CODEX_MODEL_MAP", "{}")
 
