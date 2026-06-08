@@ -161,15 +161,38 @@ def _normalize_thinking(data: dict) -> bool:
         return False
 
     thinking_type = thinking_cfg.get("type", "")
+    modified = False
+
+    # Always strip reasoning_effort / output_config — DeepSeek rejects them
+    # when thinking is anything other than "enabled"
+    if thinking_type != "enabled":
+        for key in ("reasoning_effort", "output_config"):
+            val = data.pop(key, None)
+            if val is not None:
+                logger.info("[THINKING] removed %s=%s", key, val)
+                modified = True
+
     if thinking_type in ("enabled", "disabled"):
-        return False
+        if modified:
+            stripped = 0
+            for msg in data.get("messages", []):
+                if msg.get("role") != "assistant":
+                    continue
+                content = msg.get("content", [])
+                if isinstance(content, str):
+                    continue
+                new_content = [
+                    b for b in content
+                    if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+                ]
+                if len(new_content) != len(content):
+                    stripped += len(content) - len(new_content)
+                    msg["content"] = new_content
+            if stripped:
+                logger.info("[THINKING] disabled mode — stripped %d thinking blocks", stripped)
+        return modified
 
     data["thinking"] = {"type": "disabled"}
-
-    for key in ("reasoning_effort", "output_config"):
-        val = data.pop(key, None)
-        if val is not None:
-            logger.info("[THINKING] removed %s=%s", key, val)
 
     stripped = 0
     for msg in data.get("messages", []):
