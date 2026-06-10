@@ -74,9 +74,13 @@ Responses API 输入 → Chat Completions messages 的翻译规则：
 
 ### 模型名解析
 
-两层模型映射策略：
-1. `CODEX_MODEL_MAP` JSON 对象中精确匹配或最长前缀匹配
-2. 匹配失败时回退到 `CODEX_DEFAULT_MODEL`（默认 `deepseek-v4-pro`）
+四层模型映射策略：
+1. **DeepSeek 原生模型透传** — 模型名以 `deepseek-` 开头时原样透传，不经映射
+2. `CODEX_MODEL_MAP` 精确匹配
+3. `CODEX_MODEL_MAP` 最长前缀匹配
+4. 匹配失败时回退到 `CODEX_DEFAULT_MODEL`（默认 `deepseek-v4-pro`）
+
+即：Codex CLI 可以直接传入 `deepseek-v4-pro`、`deepseek-v4-flash` 等 DeepSeek 原生模型名直接使用，无需经过映射表。非 DeepSeek 模型名（如 `claude-sonnet-4-20250514`）仍走映射表或回退。
 
 ## 翻译流程：流式响应
 

@@ -7,12 +7,10 @@
 import json
 
 from dsv4_cc_proxy.proxy import (
-    _filter_sse_line,
     _has_thinking,
     _has_tool_use,
     _inject_thinking_blocks,
     _normalize_thinking,
-    _thinking_requested,
 )
 
 # === 辅助函数 ===
@@ -113,7 +111,8 @@ def test_normalize_disabled_unchanged():
     assert data["thinking"]["type"] == "disabled"
 
 
-def test_normalize_adaptive_converts():
+def test_normalize_adaptive_converts_to_enabled():
+    """adaptive/auto → enabled，历史 thinking 块保留（enabled 模式 DeepSeek 支持）。"""
     data = {
         "thinking": {"type": "adaptive"},
         "messages": [
@@ -124,144 +123,47 @@ def test_normalize_adaptive_converts():
         ]
     }
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
+    # enabled 模式不剥离历史 thinking 块
     content = data["messages"][0]["content"]
-    assert len(content) == 1
-    assert content[0]["type"] == "text"
+    assert len(content) == 2
+    assert content[0]["type"] == "thinking"
+    assert content[1]["type"] == "text"
 
 
 def test_normalize_adaptive_removes_effort():
     data = {"thinking": {"type": "adaptive"}, "reasoning_effort": "max"}
     _normalize_thinking(data)
     assert "reasoning_effort" not in data
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_normalize_adaptive_removes_output_config():
     data = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}}
     _normalize_thinking(data)
     assert "output_config" not in data
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_normalize_no_thinking_key():
     assert not _normalize_thinking({"max_tokens": 100})
 
 
-# === 修复 3: SSE 过滤 ===
-
-def test_filter_sse_passes_non_data():
-    assert _filter_sse_line("event: message_start", set()) == ("event: message_start", set())
-    assert _filter_sse_line("", set()) == ("", set())
-    assert _filter_sse_line(":comment", set()) == (":comment", set())
-
-
-def test_filter_sse_passes_text():
-    result, _ = _filter_sse_line(
-        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
-        set()
-    )
-    assert result is not None
-
-
-def test_filter_sse_passes_tool_use():
-    result, _ = _filter_sse_line(
-        'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use",'
-        '"id":"call_1","name":"Bash","input":{}}}',
-        set()
-    )
-    assert result is not None
-
-
-def test_filter_sse_filters_thinking_start():
-    idx = set()
-    result, idx = _filter_sse_line(
-        'data: {"type":"content_block_start","index":0,"content_block":'
-        '{"type":"thinking","thinking":"","signature":""}}',
-        idx
-    )
-    assert result is None
-    assert 0 in idx
-
-
-def test_filter_sse_filters_thinking_delta():
-    idx = {0}
-    result, idx = _filter_sse_line(
-        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Hello"}}',
-        idx
-    )
-    assert result is None
-
-
-def test_filter_sse_filters_signature_delta():
-    idx = {0}
-    result, idx = _filter_sse_line(
-        'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}',
-        idx
-    )
-    assert result is None
-
-
-def test_filter_sse_full_thinking_block():
-    idx = set()
-    lines = [
-        'data: {"type":"content_block_start","index":0,"content_block":'
-        '{"type":"thinking","thinking":"","signature":""}}',
-        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"x"}}',
-        'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}',
-        'data: {"type":"content_block_stop","index":0}',
-        'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
-    ]
-    results = []
-    for line in lines:
-        filtered, idx = _filter_sse_line(line, idx)
-        results.append(filtered)
-    assert results == [None, None, None, None, lines[4]]
-
-
-def test_filter_sse_invalid_json():
-    result, _ = _filter_sse_line("data: {invalid json}", set())
-    assert result == "data: {invalid json}"
-
-
-# === thinking_requested ===
-
-def test_thinking_requested():
-    assert _thinking_requested({"thinking": {"type": "enabled"}})
-    assert not _thinking_requested({"thinking": {"type": "disabled"}})
-    assert not _thinking_requested({"thinking": {"type": "adaptive"}})
-    assert not _thinking_requested({})
-
-
 # === proxy.py 边缘情况补充 ===
 
 
-def test_thinking_requested_non_dict():
-    """thinking 配置不是 dict -> False。"""
-    assert not _thinking_requested({"thinking": "enabled"})
-
-
-def test_thinking_requested_no_thinking_key():
-    """data 中无 thinking 键 -> False。"""
-    assert not _thinking_requested({"model": "deepseek-v4-pro"})
-
-
-def test_thinking_requested_empty_data():
-    """空 data -> False。"""
-    assert not _thinking_requested({})
-
-
 def test_normalize_thinking_no_messages_key():
-    """data 无 messages 键 -> True（thinking 被修改）。"""
+    """data 无 messages 键 -> True（thinking 被修改为 enabled）。"""
     data = {"thinking": {"type": "adaptive"}}
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_normalize_thinking_unknown_type():
-    """未知 thinking type -> 转换为 disabled。"""
+    """未知 thinking type -> 转换为 enabled。"""
     data = {"thinking": {"type": "auto"}, "messages": [{"role": "user", "content": "hi"}]}
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_inject_thinking_blocks_non_dict_thinking():
@@ -284,20 +186,3 @@ def test_inject_thinking_blocks_no_messages():
     assert not _inject_thinking_blocks(data)
 
 
-def test_filter_sse_thinking_delta_wrong_index():
-    """thinking_delta 但 index 不在 thinking_indices 中 -> 透传。"""
-    line = (
-        'data: {"type":"content_block_delta","index":0,'
-        '"delta":{"type":"thinking_delta","thinking":"Hello"}}'
-    )
-    result, indices = _filter_sse_line(line, set())
-    assert result == line
-    assert indices == set()
-
-
-def test_filter_sse_content_block_stop_tracking():
-    """content_block_stop 正确从 thinking_indices 清除 index。"""
-    line = 'data: {"type":"content_block_stop","index":0}'
-    result, indices = _filter_sse_line(line, {0})
-    assert result is None
-    assert 0 not in indices

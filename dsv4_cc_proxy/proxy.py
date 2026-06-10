@@ -30,6 +30,7 @@ from starlette.routing import Route
 
 from dsv4_cc_proxy._version import VERSION
 from dsv4_cc_proxy.codex.config import CODEX_UPSTREAM
+from dsv4_cc_proxy.codex.models import get_codex_catalog, get_openai_models_list
 from dsv4_cc_proxy.codex.sse import translate_sse_stream
 from dsv4_cc_proxy.codex.translate import translate_request
 
@@ -154,6 +155,15 @@ def _inject_thinking_blocks(data: dict) -> bool:
 
 
 def _normalize_thinking(data: dict) -> bool:
+    """将非标准 thinking type 标准化为 DeepSeek 兼容格式。
+
+    DeepSeek Anthropic API 只接受 enabled/disabled 两种 type。
+    adaptive/auto 映射为 enabled（让 DeepSeek 自行决定何时思考）。
+
+    同时清理 DeepSeek 不认识的字段：reasoning_effort、output_config。
+    当映射目标为 disabled 时，剥离历史中的 thinking/redacted_thinking
+    块（因为 DeepSeek 在 disabled 模式下不认识这些块）。
+    """
     if "thinking" not in data:
         return False
     thinking_cfg = data["thinking"]
@@ -164,13 +174,21 @@ def _normalize_thinking(data: dict) -> bool:
     if thinking_type in ("enabled", "disabled"):
         return False
 
-    data["thinking"] = {"type": "disabled"}
+    # adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）
+    target = "enabled"
+    data["thinking"] = {"type": target}
 
     for key in ("reasoning_effort", "output_config"):
         val = data.pop(key, None)
         if val is not None:
             logger.info("[THINKING] removed %s=%s", key, val)
 
+    # enabled 模式下 DeepSeek 支持 thinking 块，不需要剥离历史
+    if target == "enabled":
+        logger.info("[THINKING] converted %s → %s", thinking_type, target)
+        return True
+
+    # disabled 模式需剥离历史中的 thinking 块
     stripped = 0
     for msg in data.get("messages", []):
         if msg.get("role") != "assistant":
@@ -187,48 +205,15 @@ def _normalize_thinking(data: dict) -> bool:
             msg["content"] = new_content
 
     logger.info(
-        "[THINKING] converted %s → disabled, stripped %d thinking blocks",
-        thinking_type, stripped,
+        "[THINKING] converted %s → %s, stripped %d thinking blocks",
+        thinking_type, target, stripped,
     )
     return True
 
 
-# ---- 修复 3: 响应端 thinking 剥离 ----
-
-
-def _thinking_requested(data: dict) -> bool:
-    thinking_cfg = data.get("thinking", {})
-    return (
-        isinstance(thinking_cfg, dict)
-        and thinking_cfg.get("type") == "enabled"
-    )
-
-
-def _filter_sse_line(line: str, thinking_indices: set[int]) -> tuple[str | None, set[int]]:
-    if not line.startswith("data: "):
-        return line, thinking_indices
-
-    try:
-        data = json.loads(line[6:])
-    except json.JSONDecodeError:
-        return line, thinking_indices
-
-    t = data.get("type", "")
-
-    if t == "content_block_start":
-        cb = data.get("content_block", {})
-        if cb.get("type") == "thinking":
-            thinking_indices.add(data["index"])
-            return None, thinking_indices
-
-    elif t in ("content_block_delta", "content_block_stop"):
-        idx = data.get("index")
-        if idx in thinking_indices:
-            if t == "content_block_stop":
-                thinking_indices.discard(idx)
-            return None, thinking_indices
-
-    return line, thinking_indices
+# ---- 响应端: thinking 透传 ----
+# DeepSeek 返回的 thinking 块直接透传给客户端，
+# Claude Code 本身支持展示思考过程。
 
 
 # ---- 流量捕获 ----
@@ -298,7 +283,6 @@ async def proxy(request: Request):
 
     body = await request.body() if is_messages else b""
     modified_body = body
-    strip_thinking = True
 
     if is_messages:
         try:
@@ -306,18 +290,11 @@ async def proxy(request: Request):
             logger.info("[REQ] %s", json.dumps(_summarize_request(data), ensure_ascii=False))
             _dump_json("last_request.json", data)
 
-            original_thinking_enabled = _thinking_requested(data)
-
             thinking_normalized = _normalize_thinking(data)
 
             if _inject_thinking_blocks(data):
                 logger.info("[INJECT] added empty thinking block")
                 thinking_normalized = True
-
-            if original_thinking_enabled:
-                strip_thinking = False
-            else:
-                logger.info("[STRIP] response filter enabled")
 
             if thinking_normalized:
                 modified_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -348,78 +325,19 @@ async def proxy(request: Request):
     is_sse = "text/event-stream" in content_type
     logger.info("[RESP] status=%s sse=%s", upstream_resp.status_code, is_sse)
 
-    if not strip_thinking or not is_sse:
-        async def passthrough():
-            try:
-                async for chunk in upstream_resp.aiter_bytes():
-                    yield chunk
-            except Exception:
-                logger.exception("upstream stream read error")
-            finally:
-                await upstream_resp.aclose()
-
-        return StreamingResponse(
-            passthrough(),
-            status_code=upstream_resp.status_code,
-            headers=_build_response_headers(upstream_resp, is_sse),
-        )
-
-    logger.info("[FILTER] stripping thinking from SSE stream")
-
-    async def filtered_stream():
-        thinking_indices = set()
-        event_types = []
-        all_filtered = []
-        buffer = ""
-
+    async def passthrough():
         try:
             async for chunk in upstream_resp.aiter_bytes():
-                text = chunk.decode("utf-8", errors="replace")
-                buffer += text
-
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-
-                    if line.startswith("data: ") and len(event_types) < MAX_EVENT_TYPES:
-                        try:
-                            d = json.loads(line[6:])
-                            event_types.append(d.get("type", "?"))
-                        except json.JSONDecodeError:
-                            pass
-
-                    filtered, thinking_indices = _filter_sse_line(line, thinking_indices)
-                    if filtered is not None:
-                        if len(all_filtered) < MAX_FILTERED_LINES:
-                            all_filtered.append(filtered)
-                        yield (filtered + "\n").encode("utf-8")
-
-            if buffer.strip():
-                if buffer.startswith("data: ") and len(event_types) < MAX_EVENT_TYPES:
-                    try:
-                        d = json.loads(buffer[6:])
-                        event_types.append(d.get("type", "?"))
-                    except json.JSONDecodeError:
-                        pass
-                filtered, thinking_indices = _filter_sse_line(buffer, thinking_indices)
-                if filtered is not None:
-                    yield (filtered + "\n").encode("utf-8")
-
+                yield chunk
         except Exception:
             logger.exception("upstream stream read error")
         finally:
-            logger.info("[RESP-EVENTS] raw=%s", event_types[:LOG_EVENT_PREVIEW])
-            logger.info("[RESP-FILTERED] lines=%d", len(all_filtered))
-            _dump_json("last_response_events.json", {
-                "raw_events": event_types,
-                "filtered_count": len(all_filtered),
-                "first_filtered": all_filtered[:DUMP_PREVIEW_LINES],
-            })
             await upstream_resp.aclose()
 
     return StreamingResponse(
-        filtered_stream(),
+        passthrough(),
         status_code=upstream_resp.status_code,
-        headers=_build_response_headers(upstream_resp, is_sse=True),
+        headers=_build_response_headers(upstream_resp, is_sse),
     )
 
 
@@ -660,6 +578,28 @@ async def responses_handler(request: Request):
         return await _handle_non_stream_response(chat_request, headers, upstream_url)
 
 
+# ---- Codex 模型目录端点 ----
+
+
+async def models_handler(request: Request):
+    """GET /v1/models -- 返回 OpenAI 标准格式的可用模型列表。"""
+    logger.info("[MODELS] GET /v1/models")
+    return JSONResponse({
+        "object": "list",
+        "data": get_openai_models_list(),
+    })
+
+
+async def codex_model_catalog_handler(request: Request):
+    """GET /model-catalog -- 返回 Codex model_catalog_json 格式的模型目录。
+
+    用户可将此端点输出保存为 JSON 文件，并在 Codex config.toml 中
+    通过 model_catalog_json 字段引用。
+    """
+    logger.info("[MODELS] GET /model-catalog")
+    return JSONResponse({"models": get_codex_catalog()})
+
+
 async def compact_handler(request: Request):
     """POST /v1/responses/compact -- 暂不支持,返回 501。"""
     logger.info("[CODEX] POST /v1/responses/compact -- 501 not_implemented")
@@ -695,6 +635,8 @@ def create_app() -> Starlette:
             Route("/health", health, methods=["GET"]),
             Route("/v1/responses/compact", compact_handler, methods=["POST"]),
             Route("/v1/responses", responses_handler, methods=["POST"]),
+            Route("/v1/models", models_handler, methods=["GET"]),
+            Route("/model-catalog", codex_model_catalog_handler, methods=["GET"]),
             Route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]),
         ],
     )

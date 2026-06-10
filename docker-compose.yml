@@ -7,6 +7,8 @@ services:
     environment:
       - PROXY_UPSTREAM=${PROXY_UPSTREAM:-https://api.deepseek.com/anthropic}
       - PROXY_LOG_LEVEL=${PROXY_LOG_LEVEL:-warning}
+      - CODEX_DEFAULT_MODEL=deepseek-v4-pro
+      - CODEX_MODEL_MAP={"gpt-5.5": "deepseek-v4-pro", "gpt-5.4": "deepseek-v4-pro", "gpt-5.4-mini": "deepseek-v4-flash", "gpt-5.3-codex": "deepseek-v4-flash", "gpt-5.2": "deepseek-v4-pro"}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:16889/health')"]

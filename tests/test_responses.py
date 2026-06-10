@@ -474,21 +474,40 @@ class TestProxyPassthrough:
         assert body["status"] == "ok"
 
     def test_passthrough_other_endpoint(self, client):
-        """GET /v1/models -> 透传, 与上游 mock 返回一致。"""
-        mock_resp = _MockJSONResponse(status_code=200, json_data={
-            "object": "list",
-            "data": [{"id": "deepseek-v4-pro", "object": "model"}],
-        })
-
-        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
-            mock_get_client.return_value = _make_mock_client(mock_resp)
-
-            resp = client.get("/v1/models")
+        """GET /v1/models — 本地端点返回 DeepSeek 模型列表。"""
+        resp = client.get("/v1/models")
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["object"] == "list"
-        assert body["data"][0]["id"] == "deepseek-v4-pro"
+        assert "data" in body
+        assert len(body["data"]) >= 2
+        ids = {m["id"] for m in body["data"]}
+        assert "deepseek-v4-pro" in ids
+        assert "deepseek-v4-flash" in ids
+        for model in body["data"]:
+            assert model["object"] == "model"
+            assert model["owned_by"] == "deepseek"
+
+    def test_model_catalog_endpoint(self, client):
+        """GET /model-catalog — 返回 Codex model_catalog_json 格式。"""
+        resp = client.get("/model-catalog")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert isinstance(body, dict)
+        assert "models" in body
+        models = body["models"]
+        assert isinstance(models, list)
+        assert len(models) >= 2
+        slugs = {m["slug"] for m in models}
+        assert "deepseek-v4-pro" in slugs
+        assert "deepseek-v4-flash" in slugs
+        for model in models:
+            assert model["provider"] == "deepseek-proxy"
+            assert "display_name" in model
+            assert "context_window" in model
+            assert "supports_parallel_tool_calls" in model
 
     def test_passthrough_non_deepseek_model(self, client):
         """POST /v1/messages 但非 deepseek-v4 模型 -> 透传, 不触发 thinking 处理。"""
@@ -530,8 +549,8 @@ class TestProxyPassthrough:
         assert body["choices"][0]["message"]["content"] == "Hello"
 
 
-class TestProxyFilteredStream:
-    """proxy() 的 filtered_stream 路径（upstream 返回 SSE 含 thinking 事件）。"""
+class TestProxyPassthroughStream:
+    """proxy() 的 SSE 直通路径（thinking 事件透传给客户端）。"""
 
     # SSE 流数据: 包含 thinking 事件的模拟 DeepSeek 流
     _THINKING_STREAM_CHUNKS = [
@@ -544,8 +563,8 @@ class TestProxyFilteredStream:
         b'data: [DONE]\n',
     ]
 
-    def test_filtered_stream_strips_thinking(self, client):
-        """请求不含 thinking 时, upstream SSE 中 thinking 事件被剥离。"""
+    def test_stream_passes_thinking(self, client):
+        """thinking 事件透传给客户端，不再过滤。"""
         mock_resp = _MockStreamResponse(status_code=200, chunks=self._THINKING_STREAM_CHUNKS)
 
         with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
@@ -559,13 +578,12 @@ class TestProxyFilteredStream:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
 
-        # 验证 thinking 事件被剥离
-        assert '"type":"thinking"' not in resp.text
-        assert '"thinking_delta"' not in resp.text
-        assert '"signature_delta"' not in resp.text
+        # 验证 thinking 事件被保留（透传）
+        assert '"type":"thinking"' in resp.text
+        assert '"thinking_delta"' in resp.text
 
-    def test_filtered_stream_passes_text(self, client):
-        """同 filtered_stream 路径, text delta 事件保留。"""
+    def test_stream_passes_text(self, client):
+        """SSE 直通路径, text delta 事件保留。"""
         mock_resp = _MockStreamResponse(status_code=200, chunks=self._THINKING_STREAM_CHUNKS)
 
         with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
@@ -580,8 +598,8 @@ class TestProxyFilteredStream:
         assert "text_delta" in resp.text
         assert '"text":"Final answer"' in resp.text
 
-    def test_filtered_stream_returns_200(self, client):
-        """正常 filtered_stream 路径返回 200 + text/event-stream。"""
+    def test_stream_returns_200(self, client):
+        """SSE 直通路径返回 200 + text/event-stream。"""
         mock_resp = _MockStreamResponse(status_code=200, chunks=self._THINKING_STREAM_CHUNKS)
 
         with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
@@ -600,14 +618,17 @@ class TestProxyBuildRequest:
     """proxy() handler 中 build_request 和上游响应处理边缘情况。"""
 
     def test_build_request_upstream_error(self, client):
-        """上游连接失败时返回 502 + proxy_error。"""
+        """上游连接失败时返回 502 + proxy_error。
+
+        使用 /v1/chat/completions (非专属端点) 触发通配路由 proxy() handler。
+        """
         with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
             mock_client = AsyncMock(spec=httpx.AsyncClient)
             mock_client.build_request.return_value = MagicMock(spec=httpx.Request)
             mock_client.send.side_effect = httpx.ConnectError("Connection refused")
             mock_get_client.return_value = mock_client
 
-            resp = client.get("/v1/models")
+            resp = client.get("/v1/chat/completions")
 
         assert resp.status_code == 502
         body = resp.json()

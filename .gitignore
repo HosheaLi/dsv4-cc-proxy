@@ -12,3 +12,4 @@ build/
 *.egg-info/
 .coverage
 coverage.svg
+.claude/

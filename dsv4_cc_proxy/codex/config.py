@@ -49,16 +49,27 @@ def _parse_model_map(raw: str) -> dict[str, str]:
 # ---- 公开 API ----
 
 
+def _is_deepseek_model(name: str) -> bool:
+    """检查模型名是否是 DeepSeek 原生模型。"""
+    return name.startswith("deepseek-")
+
+
 def resolve_model(model_name: str) -> str:
     """将 Codex 模型名解析为 DeepSeek 模型字符串。
 
     解析顺序:
-    1. CODEX_MODEL_MAP 精确匹配
-    2. CODEX_MODEL_MAP 最长前缀匹配
-    3. CODEX_DEFAULT_MODEL 回退
+    1. 已是 DeepSeek 原生模型名（deepseek-*）→ 原样透传
+    2. CODEX_MODEL_MAP 精确匹配
+    3. CODEX_MODEL_MAP 最长前缀匹配
+    4. CODEX_DEFAULT_MODEL 回退
 
     从不返回 None 或空字符串。
     """
+    # 0. DeepSeek 原生模型名直接透传
+    if _is_deepseek_model(model_name):
+        logger.debug("[CODEX] passthrough: %s", model_name)
+        return model_name
+
     model_map = _parse_model_map(_RAW_MODEL_MAP)
 
     # 1. 精确匹配

@@ -6,7 +6,7 @@
     <string>com.deepseek.thinking-proxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/python3</string>
+        <string>/opt/homebrew/bin/python3</string>
         <string>-m</string>
         <string>dsv4_cc_proxy</string>
     </array>
