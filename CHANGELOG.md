@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-06-18
+
+### Fixed
+- **Codex CLI 文本不显示** — 修复三个 SSE 兼容性问题：
+  - 所有流式事件统一包含 `sequence_number`（之前仅 delta 事件有）
+  - response 对象字段名 `created` → `created_at`（对齐 Responses API 规范）
+  - `content_part.added` 移除不规范的多余 `item_id` 字段
+- 缺失 `response.output_text.done` 和 `response.content_part.done` SSE 事件
+- `function_call_arguments.done` 字段 `delta` → `arguments`
+- pyproject.toml 项目 URL 指向正确的仓库名 dsv4-cc-proxy
+- adaptive/auto thinking 映射为 enabled，响应端透传 thinking
+- translate usage 字段名修复及 input items KeyError
+
+### Added
+- SSE keepalive 心跳（3s 间隔）防止 Codex CLI 超时断开
+- 参考实现对比文档（ai-adapter / llama.cpp PR #21174）
+
 ## [2.0.0] - 2026-06-07
 
 ### Added
