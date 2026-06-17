@@ -36,9 +36,9 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/HosheaLi/P14_dsv4ToCC"
-Source = "https://github.com/HosheaLi/P14_dsv4ToCC"
-Documentation = "https://hosheali.github.io/P14_dsv4ToCC"
+Homepage = "https://github.com/HosheaLi/dsv4-cc-proxy"
+Source = "https://github.com/HosheaLi/dsv4-cc-proxy"
+Documentation = "https://hosheali.github.io/dsv4-cc-proxy"
 
 [project.scripts]
 dsv4-cc-proxy = "dsv4_cc_proxy.__main__:main"
