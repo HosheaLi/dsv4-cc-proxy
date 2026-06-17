@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from dsv4_cc_proxy.codex.models import (
     MODEL_DEFINITIONS,
     get_codex_catalog,

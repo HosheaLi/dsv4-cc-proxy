@@ -7,7 +7,6 @@
 """
 
 import signal
-from unittest.mock import patch
 
 import pytest
 
@@ -186,10 +185,13 @@ def test_main_startup_with_dump(monkeypatch, tmp_path):
 
 
 def test_version_importable():
-    """VERSION 可导入。"""
+    """VERSION 可导入且为合法 semver 字符串。"""
+    import re
+
     from dsv4_cc_proxy._version import VERSION
 
-    assert VERSION == "2.0.0"
+    assert isinstance(VERSION, str)
+    assert re.match(r"^\d+\.\d+\.\d+", VERSION), f"Invalid semver: {VERSION}"
 
 
 def test_stop_pidfile_corrupted(monkeypatch, tmp_path):

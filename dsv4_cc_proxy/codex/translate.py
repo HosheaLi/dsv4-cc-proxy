@@ -16,11 +16,10 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 from typing import Any
 
-from dsv4_cc_proxy.codex.config import CODEX_DEFAULT_MODEL, CODEX_UPSTREAM, resolve_model
+from dsv4_cc_proxy.codex.config import CODEX_DEFAULT_MODEL, resolve_model
 from dsv4_cc_proxy.codex.tools import convert_tools
 
 logger = logging.getLogger("deepseek-proxy")

@@ -152,16 +152,24 @@ def convert_tools(tools: list[dict]) -> list[dict]:
                 _clean_schema(params)
             elif isinstance(params, list):
                 # D-07: list 类型也视为无效 — schema 必须是 dict
-                tool_name = converted.get("function", {}).get("name", "?") if "function" in converted else converted.get("name", "?")
+                _tool_name = (
+                    converted.get("function", {}).get("name", "?")
+                    if "function" in converted
+                    else converted.get("name", "?")
+                )
                 raise ValueError(
-                    f"Invalid tool parameters schema for '{tool_name}': "
+                    f"Invalid tool parameters schema for '{_tool_name}': "
                     f"expected dict, got list"
                 )
             else:
                 # D-07: 非 dict 非 None 的 parameters → 抛出异常（Pitfall 4）
-                tool_name = converted.get("function", {}).get("name", "?") if "function" in converted else converted.get("name", "?")
+                _tool_name = (
+                    converted.get("function", {}).get("name", "?")
+                    if "function" in converted
+                    else converted.get("name", "?")
+                )
                 raise ValueError(
-                    f"Invalid tool parameters schema for '{tool_name}': "
+                    f"Invalid tool parameters schema for '{_tool_name}': "
                     f"expected dict, got {type(params).__name__}"
                 )
 

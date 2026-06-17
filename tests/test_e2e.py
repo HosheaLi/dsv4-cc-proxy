@@ -7,14 +7,10 @@
 运行: python3 -m pytest tests/test_e2e.py -v
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
-
 from conftest import _make_mock_client, _MockJSONResponse, _MockStreamResponse
-
 
 # ---- E2E 场景 1: 非流式 JSON 响应 ----
 

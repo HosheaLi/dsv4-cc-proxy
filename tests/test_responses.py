@@ -6,16 +6,12 @@
 运行: python3 -m pytest tests/test_responses.py -v
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
-
-from dsv4_cc_proxy.proxy import _translate_chat_to_responses
-
 from conftest import _make_mock_client, _MockJSONResponse, _MockStreamResponse
 
+from dsv4_cc_proxy.proxy import _translate_chat_to_responses
 
 # ---- 测试用例 ----
 

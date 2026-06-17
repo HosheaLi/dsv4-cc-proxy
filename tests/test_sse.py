@@ -8,10 +8,7 @@
 
 import json
 
-import pytest
-
 from dsv4_cc_proxy.codex.sse import translate_sse_stream
-
 
 # ---- 测试辅助 ----
 
