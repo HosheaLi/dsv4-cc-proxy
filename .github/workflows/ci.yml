@@ -25,13 +25,11 @@ jobs:
         pip install ".[test]"
 
     - name: Run tests
-      run: python -m pytest tests/ -v --cov=dsv4_cc_proxy --cov-report=term
+      run: python -m pytest tests/ -v --cov=dsv4_cc_proxy --cov-report=term --cov-report=json
 
     - name: Generate coverage badge
       if: github.ref == 'refs/heads/main'
-      run: |
-        pip install setuptools coverage-badge
-        coverage-badge -o coverage.svg
+      run: python3 scripts/coverage-badge.py
 
     - name: Commit coverage badge
       if: github.ref == 'refs/heads/main'
