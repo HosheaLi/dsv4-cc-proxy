@@ -323,7 +323,7 @@ def test_full_lifecycle():
     ]
     events = _collect_events(chunks)
 
-    # 严格事件顺序验证
+    # 严格事件顺序验证（含 CODX-13 output_text.done + content_part.done 修复）
     expected_sequence = [
         "response.created",
         "response.in_progress",
@@ -333,6 +333,8 @@ def test_full_lifecycle():
         "response.output_item.added",                # message
         "response.content_part.added",
         "response.output_text.delta",
+        "response.output_text.done",                 # CODX-13: text 完结事件
+        "response.content_part.done",                # CODX-13: content part 完结事件
         "response.output_item.done",                 # text -> tool_call transition
         "response.output_item.added",                # function_call
         "response.function_call_arguments.delta",    # initial empty delta

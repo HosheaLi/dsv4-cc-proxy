@@ -223,6 +223,57 @@ def _build_output_text_delta(
     return _build_sse_event("response.output_text.delta", data)
 
 
+def _build_output_text_done(
+    item_id: str, output_index: int, delta: str,
+) -> str:
+    """构建 response.output_text.done SSE 事件。
+
+    OpenAI Responses API 要求在每个 message 类型的 output_item 完结前
+    发送此事件。缺失此事件会导致 Codex CLI 无法提取文本输出（工具调用
+    通过 function_call_arguments.done 规避了该问题，因此只有纯文本
+    输出受影响）。
+
+    Args:
+        item_id: 所属 item 的 id。
+        output_index: 输出项序号。
+        delta: 完整文本内容。
+
+    Returns:
+        SSE 事件字符串。
+    """
+    data = {
+        "type": "response.output_text.done",
+        "item_id": item_id,
+        "output_index": output_index,
+        "content_index": 0,
+        "text": delta,
+    }
+    return _build_sse_event("response.output_text.done", data)
+
+
+def _build_content_part_done(
+    item_id: str, output_index: int, content_index: int = 0,
+) -> str:
+    """构建 response.content_part.done SSE 事件。
+
+    Args:
+        item_id: 所属 item 的 id。
+        output_index: 输出项序号。
+        content_index: content part 序号（固定为 0）。
+
+    Returns:
+        SSE 事件字符串。
+    """
+    data = {
+        "type": "response.content_part.done",
+        "item_id": item_id,
+        "output_index": output_index,
+        "content_index": content_index,
+        "part": {"type": "output_text", "text": ""},
+    }
+    return _build_sse_event("response.content_part.done", data)
+
+
 def _build_function_call_arguments_delta(
     item_id: str, call_id: str, output_index: int, delta: str, sequence: int,
 ) -> str:
@@ -388,6 +439,39 @@ def _close_active_tool_calls(state: _ToolCallState) -> list[str]:
     return events
 
 
+def _close_text_item(
+    text_item_id: str,
+    text_output_index: int,
+    accumulated_text: str,
+) -> list[str]:
+    """关闭文本输出 item，返回完整的 SSE 事件序列。
+
+    Responses API 标准生命周期要求 text item 关闭前依次发送:
+    1. response.output_text.done — 完整文本内容
+    2. response.content_part.done — content part 完结
+    3. response.output_item.done — output item 完结
+
+    缺失 response.output_text.done 会导致 Codex CLI 无法提取
+    文本输出（#13 — 文本输出静默 bug）。
+
+    Args:
+        text_item_id: 文本 item 的 id。
+        text_output_index: 文本 item 的 output_index。
+        accumulated_text: 完整文本内容。
+
+    Returns:
+        SSE 事件字符串列表（3 个事件）。
+    """
+    return [
+        _build_output_text_done(text_item_id, text_output_index, accumulated_text),
+        _build_content_part_done(text_item_id, text_output_index, 0),
+        _build_output_item_done(
+            text_output_index, "message", text_item_id,
+            accumulated_text=accumulated_text,
+        ),
+    ]
+
+
 # ---- 公开 API ----
 
 
@@ -472,10 +556,10 @@ async def translate_sse_stream(
                             yield event
                         tc_state.clear()
                     elif current_output_type == "text":
-                        yield _build_output_item_done(
-                            text_output_index, "message", text_item_id,
-                            accumulated_text=accumulated_text,
-                        )
+                        for event in _close_text_item(
+                            text_item_id, text_output_index, accumulated_text,
+                        ):
+                            yield event
                         accumulated_text = ""
                         text_item_id = None
                     # current_output_type == "reasoning" → 不触发 transition
@@ -560,10 +644,10 @@ async def translate_sse_stream(
                         # 新工具调用 (D-07)
                         # 如果当前有 text 或 reasoning item，先关闭
                         if current_output_type == "text":
-                            yield _build_output_item_done(
-                                text_output_index, "message", text_item_id,
-                                accumulated_text=accumulated_text,
-                            )
+                            for event in _close_text_item(
+                                text_item_id, text_output_index, accumulated_text,
+                            ):
+                                yield event
                             accumulated_text = ""
                             text_item_id = None
                             logger.info(
@@ -626,10 +710,10 @@ async def translate_sse_stream(
 
                 # 关闭当前 text 或 reasoning item
                 if current_output_type == "text" and text_item_id:
-                    yield _build_output_item_done(
-                        text_output_index, "message", text_item_id,
-                        accumulated_text=accumulated_text,
-                    )
+                    for event in _close_text_item(
+                        text_item_id, text_output_index, accumulated_text,
+                    ):
+                        yield event
                 elif current_output_type == "reasoning" and reasoning_item_id:
                     yield _build_output_item_done(
                         reasoning_output_index, "reasoning",
