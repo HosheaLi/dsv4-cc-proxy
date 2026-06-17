@@ -11,9 +11,15 @@
 #   - tool_calls → function_call_arguments.delta 翻译 (CODX-08)
 #   - 类型转换: reasoning/→/text/→/tool_call 触发 item done + added (CODX-15)
 #   - 多工具并行调用独立事件流 (CODX-09)
+#
+# 参考实现:
+#   - ai-adapter (Rust, dyrnq): 确认可用的 Codex CLI + DeepSeek 代理
+#   - llama.cpp PR #21174: Responses API 合规性 & Codex CLI 兼容性修复
+#   - OpenAI Responses API 流式事件规范
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -22,6 +28,10 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 logger = logging.getLogger("deepseek-proxy")
+
+# SSE keepalive 间隔 (秒) — Codex CLI 0.130.0+ 在 ~5s 无活动后断开
+# 参考: OmniRoute PR #2599, ai-adapter HTTP/2 keep-alive
+KEEPALIVE_INTERVAL = 3.0
 
 
 @dataclass
@@ -50,6 +60,9 @@ class _ToolCallState:
 
 # ---- SSE 事件构建底层工具 ----
 
+# 当前时间戳（模块级以便测试时 mock）
+_now = time.time
+
 
 def _build_sse_event(event_type: str, data: dict) -> str:
     """构建完整 SSE 事件字符串（含 event: 前缀 + data: JSON + 空行终止）。
@@ -67,51 +80,74 @@ def _build_sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _build_response_created(response_id: str, model: str) -> str:
+def _build_sse_keepalive() -> str:
+    """构建 SSE keepalive 注释行，防止 Codex CLI 超时断开。
+
+    SSE 规范：以 ':' 开头的行是注释，客户端忽略。
+    Codex CLI 0.130.0+ 在 ~5s 无活动后断开 SSE 连接。
+    """
+    return ": keepalive\n\n"
+
+
+def _build_response_created(response_id: str, model: str, sequence: int) -> str:
     """构建 response.created SSE 事件。
 
     Args:
         response_id: 响应唯一标识符。
         model: 模型名称。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
     """
+    now = int(_now())
     data = {
         "type": "response.created",
+        "sequence_number": sequence,
         "response": {
             "id": response_id,
             "object": "response",
-            "created": int(time.time()),
+            "created_at": now,
             "model": model,
             "status": "in_progress",
-            "usage": None,
+            "output": [],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            },
         },
     }
     return _build_sse_event("response.created", data)
 
 
-def _build_response_in_progress(response_id: str) -> str:
+def _build_response_in_progress(response_id: str, sequence: int) -> str:
     """构建 response.in_progress SSE 事件。
 
     Args:
         response_id: 响应唯一标识符。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
     """
     data = {
         "type": "response.in_progress",
+        "sequence_number": sequence,
         "response": {
             "id": response_id,
             "object": "response",
+            "created_at": int(_now()),
             "status": "in_progress",
+            "output": [],
         },
     }
     return _build_sse_event("response.in_progress", data)
 
 
-def _build_output_item_added(output_index: int, item_type: str, **fields) -> str:
+def _build_output_item_added(
+    output_index: int, item_type: str, sequence: int, **fields,
+) -> str:
     """构建 response.output_item.added SSE 事件。
 
     根据 item_type 自动设置不同的 item 结构:
@@ -122,6 +158,7 @@ def _build_output_item_added(output_index: int, item_type: str, **fields) -> str
     Args:
         output_index: 输出项序号。
         item_type: 项类型 ("reasoning" | "message" | "function_call")。
+        sequence: 全局递增序列号。
         **fields: 额外字段 (item_id, name, call_id 等)。
 
     Returns:
@@ -146,28 +183,32 @@ def _build_output_item_added(output_index: int, item_type: str, **fields) -> str
         "type": "response.output_item.added",
         "item": item,
         "output_index": output_index,
+        "sequence_number": sequence,
     }
     return _build_sse_event("response.output_item.added", data)
 
 
 def _build_content_part_added(
-    item_id: str, output_index: int, content_index: int = 0,
+    output_index: int, content_index: int, sequence: int,
 ) -> str:
     """构建 response.content_part.added SSE 事件。
 
+    注意: 不包含 item_id 字段 — 参考 ai-adapter 和 OpenAI 规范，
+    content_part.added 通过 output_index 关联到所属 output item。
+
     Args:
-        item_id: 所属 item 的 id。
         output_index: 输出项序号。
         content_index: content part 序号（固定为 0）。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
     """
     data = {
         "type": "response.content_part.added",
-        "item_id": item_id,
         "output_index": output_index,
         "content_index": content_index,
+        "sequence_number": sequence,
         "part": {"type": "output_text", "text": ""},
     }
     return _build_sse_event("response.content_part.added", data)
@@ -182,7 +223,7 @@ def _build_reasoning_text_delta(
         item_id: 所属 item 的 id。
         output_index: 输出项序号。
         delta: reasoning 文本增量。
-        sequence: 序列号（递增）。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
@@ -207,7 +248,7 @@ def _build_output_text_delta(
         item_id: 所属 item 的 id。
         output_index: 输出项序号。
         delta: 文本增量。
-        sequence: 序列号（递增）。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
@@ -224,7 +265,7 @@ def _build_output_text_delta(
 
 
 def _build_output_text_done(
-    item_id: str, output_index: int, delta: str,
+    item_id: str, output_index: int, text: str, sequence: int,
 ) -> str:
     """构建 response.output_text.done SSE 事件。
 
@@ -236,7 +277,8 @@ def _build_output_text_done(
     Args:
         item_id: 所属 item 的 id。
         output_index: 输出项序号。
-        delta: 完整文本内容。
+        text: 完整文本内容。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
@@ -246,13 +288,14 @@ def _build_output_text_done(
         "item_id": item_id,
         "output_index": output_index,
         "content_index": 0,
-        "text": delta,
+        "text": text,
+        "sequence_number": sequence,
     }
     return _build_sse_event("response.output_text.done", data)
 
 
 def _build_content_part_done(
-    item_id: str, output_index: int, content_index: int = 0,
+    item_id: str, output_index: int, content_index: int, sequence: int,
 ) -> str:
     """构建 response.content_part.done SSE 事件。
 
@@ -260,6 +303,7 @@ def _build_content_part_done(
         item_id: 所属 item 的 id。
         output_index: 输出项序号。
         content_index: content part 序号（固定为 0）。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
@@ -269,6 +313,7 @@ def _build_content_part_done(
         "item_id": item_id,
         "output_index": output_index,
         "content_index": content_index,
+        "sequence_number": sequence,
         "part": {"type": "output_text", "text": ""},
     }
     return _build_sse_event("response.content_part.done", data)
@@ -284,7 +329,7 @@ def _build_function_call_arguments_delta(
         call_id: 工具调用标识符。
         output_index: 输出项序号。
         delta: arguments 增量片段。
-        sequence: 序列号（递增）。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
@@ -301,7 +346,7 @@ def _build_function_call_arguments_delta(
 
 
 def _build_function_call_arguments_done(
-    item_id: str, call_id: str, output_index: int, delta: str,
+    item_id: str, call_id: str, output_index: int, arguments: str, sequence: int,
 ) -> str:
     """构建 response.function_call_arguments.done SSE 事件。
 
@@ -309,7 +354,8 @@ def _build_function_call_arguments_done(
         item_id: 所属 item 的 id。
         call_id: 工具调用标识符。
         output_index: 输出项序号。
-        delta: 最终累计的 arguments 完整字符串。
+        arguments: 最终累计的 arguments 完整字符串。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
@@ -319,13 +365,14 @@ def _build_function_call_arguments_done(
         "item_id": item_id,
         "call_id": call_id,
         "output_index": output_index,
-        "delta": delta,
+        "arguments": arguments,
+        "sequence_number": sequence,
     }
     return _build_sse_event("response.function_call_arguments.done", data)
 
 
 def _build_output_item_done(
-    output_index: int, item_type: str, item_id: str, **fields,
+    output_index: int, item_type: str, item_id: str, sequence: int, **fields,
 ) -> str:
     """构建 response.output_item.done SSE 事件。
 
@@ -338,6 +385,7 @@ def _build_output_item_done(
         output_index: 输出项序号。
         item_type: 项类型 ("reasoning" | "message" | "function_call")。
         item_id: 项标识符。
+        sequence: 全局递增序列号。
         **fields: 额外字段 (accumulated_text, name, call_id, accumulated_arguments)。
 
     Returns:
@@ -363,47 +411,65 @@ def _build_output_item_done(
         "type": "response.output_item.done",
         "item": item,
         "output_index": output_index,
+        "sequence_number": sequence,
     }
     return _build_sse_event("response.output_item.done", data)
 
 
 def _build_response_completed(
-    response_id: str, usage: dict | None = None,
+    response_id: str, usage: dict | None, sequence: int,
 ) -> str:
     """构建 response.completed SSE 事件。
 
     Args:
         response_id: 响应唯一标识符。
         usage: token 用量 dict，None 时使用空计数。
+        sequence: 全局递增序列号。
 
     Returns:
         SSE 事件字符串。
     """
     if usage is None:
-        usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        usage_dict = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     else:
         # 翻译 DeepSeek Chat Completions → OpenAI Responses API 字段名
-        usage = {
+        usage_dict = {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
         }
+
+    now = int(_now())
     data = {
         "type": "response.completed",
+        "sequence_number": sequence,
         "response": {
             "id": response_id,
             "object": "response",
+            "created_at": now,
+            "completed_at": now,
             "status": "completed",
-            "usage": usage,
+            "output": [],
+            "usage": usage_dict,
         },
     }
     return _build_sse_event("response.completed", data)
 
 
-# ---- 内部辅助：关闭活跃工具调用 ----
+# ---- 内部辅助：关闭活跃输出 ----
+
+def _next_seq(counter: list[int]) -> int:
+    """递增序列号计数器并返回新值。
+
+    使用单元素列表实现可变引用语义，避免到处传 int 指针。
+    """
+    counter[0] += 1
+    return counter[0]
 
 
-def _close_active_tool_calls(state: _ToolCallState) -> list[str]:
+def _close_active_tool_calls(
+    state: _ToolCallState, seq: list[int],
+) -> list[str]:
     """关闭所有活跃工具调用，返回 SSE 事件行列表。
 
     每个工具调用依次产生两个事件:
@@ -412,6 +478,7 @@ def _close_active_tool_calls(state: _ToolCallState) -> list[str]:
 
     Args:
         state: 工具调用状态 dataclass，封装 6 个映射。
+        seq: 单元素 list，用作可变序列号计数器。
 
     Returns:
         SSE 事件字符串列表。
@@ -424,13 +491,16 @@ def _close_active_tool_calls(state: _ToolCallState) -> list[str]:
         accumulated = state.arguments[idx]
         name = state.names[idx]
         events.append(
-            _build_function_call_arguments_done(item_id, call_id, output_idx, accumulated),
+            _build_function_call_arguments_done(
+                item_id, call_id, output_idx, accumulated, _next_seq(seq),
+            ),
         )
         events.append(
             _build_output_item_done(
                 output_idx,
                 "function_call",
                 item_id,
+                _next_seq(seq),
                 name=name,
                 call_id=call_id,
                 accumulated_arguments=accumulated,
@@ -443,6 +513,7 @@ def _close_text_item(
     text_item_id: str,
     text_output_index: int,
     accumulated_text: str,
+    seq: list[int],
 ) -> list[str]:
     """关闭文本输出 item，返回完整的 SSE 事件序列。
 
@@ -458,15 +529,20 @@ def _close_text_item(
         text_item_id: 文本 item 的 id。
         text_output_index: 文本 item 的 output_index。
         accumulated_text: 完整文本内容。
+        seq: 单元素 list，用作可变序列号计数器。
 
     Returns:
         SSE 事件字符串列表（3 个事件）。
     """
     return [
-        _build_output_text_done(text_item_id, text_output_index, accumulated_text),
-        _build_content_part_done(text_item_id, text_output_index, 0),
+        _build_output_text_done(
+            text_item_id, text_output_index, accumulated_text, _next_seq(seq),
+        ),
+        _build_content_part_done(
+            text_item_id, text_output_index, 0, _next_seq(seq),
+        ),
         _build_output_item_done(
-            text_output_index, "message", text_item_id,
+            text_output_index, "message", text_item_id, _next_seq(seq),
             accumulated_text=accumulated_text,
         ),
     ]
@@ -500,13 +576,21 @@ async def translate_sse_stream(
         4. delta 事件 × N — 内容增量
         5. response.output_item.done — 输出项完成
         6. response.completed — 响应完成
+
+    关键兼容性修复 (参考 ai-adapter & llama.cpp PR #21174):
+        - 所有 SSE 事件均包含 sequence_number（非仅 delta 事件）
+        - response 对象使用 created_at / completed_at（非 created）
+        - content_part.added 不含 item_id（遵循 OpenAI 规范）
+        - SSE keepalive 每 3s 发送防止 Codex CLI 超时
     """
     # 状态追踪（D-06 隐式状态）
     current_output_type: str | None = None  # None | "reasoning" | "text" | "tool_call"
     tc_state = _ToolCallState()             # D-07: 追踪活跃 tool_call indices
     is_first_chunk = True
     _completed = False                       # D-08: finish_reason 幂等保护
-    sequence = 0                             # 递增序列号
+
+    # seq 使用单元素列表实现可变引用 — 避免在多个辅助函数间传递 int 的麻烦
+    seq = [0]                                # 全局递增序列号 (所有事件共享)
     response_id = f"resp_{uuid4().hex[:12]}"
     item_id_counter = 0                      # 递增 item_id
     output_counter = -1                      # 递增 output_index (0-indexed)
@@ -523,8 +607,24 @@ async def translate_sse_stream(
 
     model_name = "deepseek-v4-pro"
 
+    # SSE keepalive 定时器
+    last_event_time = _now()
+
+    def _maybe_keepalive() -> str | None:
+        """如果需要发送 keepalive 则返回 keepalive 字符串，否则 None。"""
+        nonlocal last_event_time
+        if _now() - last_event_time >= KEEPALIVE_INTERVAL:
+            last_event_time = _now()
+            return _build_sse_keepalive()
+        return None
+
     try:
         async for chunk in upstream:
+            # Keepalive: 在空闲期间保持连接
+            ka = _maybe_keepalive()
+            if ka:
+                yield ka
+
             choices = chunk.get("choices", [])
             if not choices:
                 logger.warning("[CODEX] Empty chunk received (no choices)")
@@ -540,9 +640,10 @@ async def translate_sse_stream(
             # ---- 首个 chunk: created + in_progress (D-08) ----
             if is_first_chunk:
                 model_name = chunk.get("model", "deepseek-v4-pro")
-                yield _build_response_created(response_id, model_name)
-                yield _build_response_in_progress(response_id)
+                yield _build_response_created(response_id, model_name, _next_seq(seq))
+                yield _build_response_in_progress(response_id, _next_seq(seq))
                 is_first_chunk = False
+                last_event_time = _now()
                 logger.info("[CODEX] SSE stream started for %s", response_id)
 
             # ---- reasoning_content 处理 (D-08) ----
@@ -551,13 +652,13 @@ async def translate_sse_stream(
                 if current_output_type is not None and current_output_type != "reasoning":
                     # 类型转换：关闭当前 item
                     if current_output_type == "tool_call":
-                        events = _close_active_tool_calls(tc_state)
+                        events = _close_active_tool_calls(tc_state, seq)
                         for event in events:
                             yield event
                         tc_state.clear()
                     elif current_output_type == "text":
                         for event in _close_text_item(
-                            text_item_id, text_output_index, accumulated_text,
+                            text_item_id, text_output_index, accumulated_text, seq,
                         ):
                             yield event
                         accumulated_text = ""
@@ -575,17 +676,17 @@ async def translate_sse_stream(
                     output_counter += 1
                     reasoning_output_index = output_counter
                     yield _build_output_item_added(
-                        output_counter, "reasoning",
+                        output_counter, "reasoning", _next_seq(seq),
                         item_id=reasoning_item_id,
                     )
                     current_output_type = "reasoning"
 
-                sequence += 1
                 accumulated_reasoning += reasoning
                 yield _build_reasoning_text_delta(
                     reasoning_item_id, reasoning_output_index,
-                    reasoning, sequence,
+                    reasoning, _next_seq(seq),
                 )
+                last_event_time = _now()
                 logger.debug("[CODEX] Delta: reasoning (%d chars)", len(reasoning))
 
             # ---- content (text) 处理 (D-09) ----
@@ -594,14 +695,14 @@ async def translate_sse_stream(
                 if current_output_type is not None and current_output_type != "text":
                     # 类型转换：关闭当前 item
                     if current_output_type == "tool_call":
-                        events = _close_active_tool_calls(tc_state)
+                        events = _close_active_tool_calls(tc_state, seq)
                         for event in events:
                             yield event
                         tc_state.clear()
                     elif current_output_type == "reasoning":
                         yield _build_output_item_done(
                             reasoning_output_index, "reasoning",
-                            reasoning_item_id,
+                            reasoning_item_id, _next_seq(seq),
                         )
                         reasoning_item_id = None
                         accumulated_reasoning = ""
@@ -618,20 +719,20 @@ async def translate_sse_stream(
                     output_counter += 1
                     text_output_index = output_counter
                     yield _build_output_item_added(
-                        output_counter, "message",
+                        output_counter, "message", _next_seq(seq),
                         item_id=text_item_id,
                     )
                     yield _build_content_part_added(
-                        text_item_id, output_counter, 0,
+                        output_counter, 0, _next_seq(seq),
                     )
                     current_output_type = "text"
 
-                sequence += 1
                 accumulated_text += content_text
                 yield _build_output_text_delta(
                     text_item_id, text_output_index,
-                    content_text, sequence,
+                    content_text, _next_seq(seq),
                 )
+                last_event_time = _now()
                 logger.debug("[CODEX] Delta: text (%d chars)", len(content_text))
 
             # ---- tool_calls 处理 (D-07/D-08) ----
@@ -645,7 +746,7 @@ async def translate_sse_stream(
                         # 如果当前有 text 或 reasoning item，先关闭
                         if current_output_type == "text":
                             for event in _close_text_item(
-                                text_item_id, text_output_index, accumulated_text,
+                                text_item_id, text_output_index, accumulated_text, seq,
                             ):
                                 yield event
                             accumulated_text = ""
@@ -656,7 +757,7 @@ async def translate_sse_stream(
                         elif current_output_type == "reasoning":
                             yield _build_output_item_done(
                                 reasoning_output_index, "reasoning",
-                                reasoning_item_id,
+                                reasoning_item_id, _next_seq(seq),
                             )
                             reasoning_item_id = None
                             accumulated_reasoning = ""
@@ -679,7 +780,7 @@ async def translate_sse_stream(
                         tc_state.output_indices[idx] = output_counter
 
                         yield _build_output_item_added(
-                            output_counter, "function_call",
+                            output_counter, "function_call", _next_seq(seq),
                             name=name, call_id=call_id,
                             item_id=tc_state.item_ids[idx],
                         )
@@ -689,11 +790,11 @@ async def translate_sse_stream(
                     arg_fragment = tc.get("function", {}).get("arguments", "")
                     tc_state.arguments[idx] += arg_fragment
 
-                    sequence += 1
                     yield _build_function_call_arguments_delta(
                         tc_state.item_ids[idx], tc_state.call_ids[idx],
-                        tc_state.output_indices[idx], arg_fragment, sequence,
+                        tc_state.output_indices[idx], arg_fragment, _next_seq(seq),
                     )
+                    last_event_time = _now()
                     logger.debug(
                         "[CODEX] Delta: tool_call idx=%s (%d chars)",
                         idx, len(arg_fragment),
@@ -703,7 +804,7 @@ async def translate_sse_stream(
             if finish_reason:
                 # 关闭所有活跃工具调用
                 if tc_state.active_indices:
-                    events = _close_active_tool_calls(tc_state)
+                    events = _close_active_tool_calls(tc_state, seq)
                     for event in events:
                         yield event
                     tc_state.clear()
@@ -711,25 +812,26 @@ async def translate_sse_stream(
                 # 关闭当前 text 或 reasoning item
                 if current_output_type == "text" and text_item_id:
                     for event in _close_text_item(
-                        text_item_id, text_output_index, accumulated_text,
+                        text_item_id, text_output_index, accumulated_text, seq,
                     ):
                         yield event
                 elif current_output_type == "reasoning" and reasoning_item_id:
                     yield _build_output_item_done(
                         reasoning_output_index, "reasoning",
-                        reasoning_item_id,
+                        reasoning_item_id, _next_seq(seq),
                     )
 
                 # 获取 usage
                 usage = chunk.get("usage")
-                yield _build_response_completed(response_id, usage)
+                yield _build_response_completed(response_id, usage, _next_seq(seq))
                 _completed = True
+                last_event_time = _now()
                 logger.info("[CODEX] SSE stream completed: %s", response_id)
 
     except Exception:
         logger.exception("[CODEX] SSE stream translation error")
         if not _completed:
-            yield _build_response_completed(response_id, None)
+            yield _build_response_completed(response_id, None, _next_seq(seq))
             logger.info(
                 "[CODEX] SSE stream gracefully closed after error: %s",
                 response_id,

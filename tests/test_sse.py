@@ -204,7 +204,7 @@ def test_tool_call_stream():
     # function_call_arguments.done — 最终 arguments 正确
     arg_done = _find_events(events, "response.function_call_arguments.done")
     assert len(arg_done) == 1
-    assert arg_done[0]["data"]["delta"] == '{"location": "SF"}'
+    assert arg_done[0]["data"]["arguments"] == '{"location": "SF"}'
 
     # output_item.done (function_call)
     done = _find_events(events, "response.output_item.done")
@@ -253,8 +253,8 @@ def test_parallel_tool_calls():
     done0 = arg_done[0]["data"]
     done1 = arg_done[1]["data"]
     # Each done must reference independent accumulated arguments
-    assert "location" in done0["delta"] or "SF" in done0["delta"]
-    assert "query" in done1["delta"] or "weather" in done1["delta"]
+    assert "location" in done0["arguments"] or "SF" in done0["arguments"]
+    assert "query" in done1["arguments"] or "weather" in done1["arguments"]
 
     # output_item.done — 两个工具各自有独立的 done
     done = _find_events(events, "response.output_item.done")
