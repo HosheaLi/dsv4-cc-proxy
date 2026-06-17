@@ -30,7 +30,7 @@ jobs:
     - name: Generate coverage badge
       if: github.ref == 'refs/heads/main'
       run: |
-        pip install coverage-badge
+        pip install setuptools coverage-badge
         coverage-badge -o coverage.svg
 
     - name: Commit coverage badge
