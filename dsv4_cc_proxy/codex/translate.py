@@ -115,7 +115,7 @@ def _translate_input_items(input_array: list[dict[str, Any]]) -> list[dict[str, 
         # ---- function_call type ----
         elif item_type == "function_call":
             # 使用 .get() 避免 KeyError — Codex 某些上下文中的 item 可能缺少字段
-            call_id = item.get("id") or item.get("call_id", "")
+            call_id = item.get("call_id") or item.get("id", "")
             tool_entry = {
                 "id": call_id,
                 "type": "function",

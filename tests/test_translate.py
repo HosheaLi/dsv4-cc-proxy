@@ -330,6 +330,51 @@ def test_function_call_output_to_tool(monkeypatch):
     assert tool_msgs[0]["content"] == "file content"
 
 
+def test_function_call_with_separate_id_and_call_id(monkeypatch):
+    """验证 function_call 同时有 id 和 call_id 时使用 call_id (CODX-11, Pitfall 5)。
+
+    Codex CLI 真实场景: function_call item 的 id (item 标识) 和
+    call_id (工具调用匹配标识) 是不同的值。call_id 必须与
+    function_call_output 的 call_id 匹配。
+    """
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"role": "user", "content": "Read and save file"},
+            # 模拟 Codex CLI 真实格式: id 和 call_id 不同
+            {
+                "type": "function_call",
+                "id": "item_3",          # item 自身 ID
+                "call_id": "call_abc123",  # 工具调用匹配 ID
+                "name": "Bash",
+                "arguments": '{"cmd": "cat file.txt"}',
+                "status": "completed",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_abc123",  # 与 function_call.call_id 匹配
+                "output": "file content here",
+            },
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    # tool_calls[].id 应该使用 call_id ("call_abc123") 而非 id ("item_3")
+    asst_msgs = [m for m in result["messages"] if m.get("role") == "assistant"]
+    assert len(asst_msgs) == 1
+    assert len(asst_msgs[0]["tool_calls"]) == 1
+    assert asst_msgs[0]["tool_calls"][0]["id"] == "call_abc123"
+
+    # tool 消息的 tool_call_id 应该匹配
+    tool_msgs = [m for m in result["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_abc123"
+
+
 # =============================================================================
 # 组 4: Reasoning 处理
 # =============================================================================

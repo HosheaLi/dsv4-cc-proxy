@@ -36,7 +36,10 @@
     "plan_bounce_script": null,
     "plan_bounce_passes": 2,
     "auto_prune_state": false,
-    "_auto_chain_active": false
+    "_auto_chain_active": false,
+    "cross_ai_execution": true,
+    "cross_ai_command": "node /Users/lihaoxuan/.claude/scripts/codex-gsd-bridge.mjs",
+    "cross_ai_timeout": 1500
   },
   "hooks": {
     "context_warnings": true
