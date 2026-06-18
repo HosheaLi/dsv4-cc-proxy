@@ -171,7 +171,20 @@ def _normalize_thinking(data: dict) -> bool:
         return False
 
     thinking_type = thinking_cfg.get("type", "")
-    if thinking_type in ("enabled", "disabled"):
+
+    # When thinking is disabled, remove all conflicting effort params.
+    # Fixes "thinking options type cannot be disabled when reasoning_effort is set"
+    # Claude Code v2.1.166+ sends output_config.effort with thinking:disabled for subagents.
+    if thinking_type == "disabled":
+        removed_any = False
+        for key in ("reasoning_effort", "output_config"):
+            if key in data:
+                data.pop(key)
+                removed_any = True
+                logger.info("[THINKING] disabled: removed %s", key)
+        return removed_any
+
+    if thinking_type == "enabled":
         return False
 
     # adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）
