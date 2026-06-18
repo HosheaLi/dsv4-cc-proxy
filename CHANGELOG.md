@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-06-19
+
+### Fixed
+- **Codex 多轮对话 tool_calls 匹配错误** — `function_call` 翻译时 `call_id` 提取优先级错误导致 400 响应：
+  - Codex CLI 的 `function_call` item 同时包含 `id`（item 标识）和 `call_id`（工具调用匹配标识）
+  - 旧逻辑 `item.id or item.call_id` 优先取 `id`，导致 `tool_calls[].id` 与后续 tool 消息的 `tool_call_id` 不匹配
+  - DeepSeek API 校验 tool_use/tool_result 配对失败返回 `insufficient tool messages following tool_calls message`
+  - 修复为 `item.call_id or item.id`，确保与 `function_call_output.call_id` 一致
+
 ## [2.0.1] - 2026-06-18
 
 ### Fixed

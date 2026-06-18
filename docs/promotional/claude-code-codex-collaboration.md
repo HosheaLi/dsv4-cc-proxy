@@ -3,7 +3,9 @@
 
 在日常开发中，我同时使用 Claude Code 和 OpenAI Codex 两个编程 Agent。一个负责规划调度，一个负责执行编码，理论上效率应该翻倍。但实际跑起来后，遇到了**文件写不进去、任务中途卡死、完成后没通知、线程残留反复弹窗**等一系列问题。
 
-这篇文章记录我从踩坑到填坑的完整过程，以及最终的协作方案。
+经过逐步排查，最终定位到根因是 **DeepSeek V4 代理的 Responses API 兼容性问题**——Codex CLI 通过代理调用 DeepSeek 时，API 响应格式不匹配导致文件写入等操作在协议层就失败了，表象上像是沙箱或权限问题。
+
+这篇文章记录我从踩坑到填坑的完整过程，根因定位，以及最终稳定的协作方案。
 
 
 ## 协作模型
@@ -15,21 +17,21 @@
 │              Claude Code (编排者)                  │
 │                                                    │
 │  1. 分析需求 → 拆分 Phase                          │
-│  2. 每个 Phase 生成详细实现指令                     │
+│  2. 每个 Phase 生成 Task Envelope                  │
 │  3. 委托 Codex 执行编码 ─────────────────┐         │
 │  4. 审查 Codex 产出 → 判定通过/修改       │         │
-│  5. 继续下一个 Phase                      │         │
+│  5. 提交代码 (Claude Code 负责)           │         │
 │                                                    │
 ├──────────────────────────────────────────────────┤
-│           codex:codex-rescue (桥接层)              │
+│        codex:codex-rescue (调度层)                 │
 │                                                    │
-│  codex-companion.mjs task --write                 │
+│  codex exec -C <worktree> --json                  │
 │       ↓                                            │
-│  App Server JSON-RPC                              │
+│  stdin/stdout 直连 (无中间守护进程)                 │
 │       ↓                                            │
 │  ┌──────────────────────────┐                     │
-│  │    Codex CLI v0.137      │                     │
-│  │    (GPT-5.4 编码引擎)     │                     │
+│  │   Codex CLI v0.141.0     │                     │
+│  │   (DeepSeek V4 via 代理)  │                     │
 │  │                          │                     │
 │  │  • 读取代码库             │                     │
 │  │  • 执行命令/写文件         │                     │
@@ -65,37 +67,36 @@
 
 ## 问题分析与解决
 
-### 问题 1：文件写不进去 — 沙箱陷阱
+### 根因定位：代理 API 兼容性问题
+
+在逐项解决表层问题之前，关键的排查过程如下：
+
+**现象**：Codex 任务报告"完成"，实际文件未落盘，`git status` 显示 clean。同时伴随间歇性任务中断、部分命令执行失败等异常。
+
+**初步排查**：初看像是 macOS Sandbox/Seatbelt 的 `workspace-write` 模式 bug——Codex 在受限沙箱中执行，文件写入被系统拦截。这也是 GitHub 上 openai/codex 已知 issue 提到的问题。
+
+但进一步验证发现：**通过 `codex exec` 直接调用，即使使用相同的沙箱参数，文件也能正常写入**。真正的问题出在 Claude Code Plugin 通过 App Server (JSON-RPC) 调用时，Codex CLI 与 DeepSeek V4 代理之间的 **Responses API 协议兼容性**——代理未正确处理部分 API 响应格式，导致 Codex 在 App Server 模式下执行文件操作时出现协议层错误。
+
+**最终解决**：更新 DeepSeek V4 代理的 Responses API 翻译层，修复协议兼容性后，两条路径（`codex exec` 和 App Server）均恢复正常。表层的 sandbox/heartbeat/ephemeral 修复仍然是必要的防御性改进。
+
+### 问题 1：文件写不进去 — 代理协议兼容性
 
 **排查过程**：
 
-第一反应是 Codex 没在做事。查了日志发现不是——Codex 确实跑了，`rm`、`cat >` 命令都执行了，但文件在磁盘上看不到。
+第一反应是 Codex 没在做事。查了日志发现不是——Codex 确实跑了，命令都执行了，但最终文件在磁盘上看不到。
 
-进一步对比发现，项目里有两套 Codex 调用路径：
+进一步对比发现两条 Codex 调用路径表现不同：
 
-- **GSD Bridge 路径**：`codex exec -s workspace-write --dangerously-bypass-approvals-and-sandbox` → **文件正常写入**
-- **Plugin 路径**：App Server `thread/start { sandbox: "workspace-write" }` → **文件不落盘**
+- **GSD Bridge 路径**：`codex exec --json` → 正常，文件落盘
+- **Plugin App Server 路径**：JSON-RPC thread/start → 异常，文件不落盘
 
-关键差异在于 `--dangerously-bypass-approvals-and-sandbox` 标志。App Server 虽然也支持 `workspace-write` 沙箱模式，但 macOS Seatbelt 会拦截实际的写操作。GitHub 上有多个已确认的 bug issue（openai/codex #14068、#6667、#5824）—— 即使在 App Server 协议中指定了 `workspace-write`，工具命令仍在 read-only 沙箱中执行。
+怀疑过是 macOS Seatbelt 沙箱问题，但 `codex exec` 在相同机器上正常排除了这个可能。最终沿协议链路逐层排查，定位到 **dsv4-cc-proxy 代理的 Responses API → Chat Completions 翻译层存在兼容性缺陷**——部分 tool call 响应未被正确解析，导致 Codex App Server 模式下的文件写入在协议层中断。表象上很容易误判为 sandbox 权限问题。
 
 **解决方案**：
 
-App Server 协议其实支持三种沙箱模式：
+修复代理的 Responses API 翻译层（`dsv4-cc-proxy/codex/translate.py`），补全 SSE 事件状态机和 tool call 响应格式兼容性。修复后所有 Codex 调用路径（`codex exec`、App Server JSON-RPC、`/codex:rescue` 插件命令）均正常落盘。
 
-| 模式 | 文件写入 | 网络 | 插件是否使用 |
-|------|---------|------|------------|
-| `read-only` | 禁止 | 禁止 | ✅ 审查任务 |
-| `workspace-write` | **buggy（macOS 不落盘）** | 可选 | ❌ 已弃用 |
-| **`danger-full-access`** | **直接落盘** | 全开 | ✅ **修复后采用** |
-
-修改一行代码（`codex-companion.mjs:488`）：
-
-```diff
-- sandbox: request.write ? "workspace-write" : "read-only",
-+ sandbox: request.write ? "danger-full-access" : "read-only",
-```
-
-`danger-full-access` 等效于 `codex exec --dangerously-bypass-approvals-and-sandbox`，完全绕过 OS 级沙箱，文件直接写入真实文件系统。
+同时保留了防御性配置——将 App Server 沙箱级别从 `workspace-write` 提升到 `danger-full-access`，避免 macOS 下潜在的 Seatbelt 拦截（沙箱行为在不同 OS 版本间不稳定）。
 
 ### 问题 2+3：无心跳 + 无完成通知
 
@@ -236,28 +237,30 @@ Claude Code: "实现 Phase 6 的 auth + events 模块"
 
 ## 小结
 
-| 修复项 | 修改文件 | 改动量 |
+| 修复项 | 修改位置 | 改动量 |
 |--------|---------|--------|
-| sandbox `danger-full-access` | codex-companion.mjs | 1 行 |
+| **代理 Responses API 协议兼容性**（根因） | dsv4-cc-proxy/codex/translate.py | ~150 行 |
+| sandbox `danger-full-access`（防御性） | codex-companion.mjs | 1 行 |
 | 30s 心跳 + 完成通知 | codex.mjs (captureTurn + runAppServerTurn) | ~70 行 |
 | 25min 超时 + `--timeout` 参数 | codex-companion.mjs + codex.mjs | ~15 行 |
 | ephemeral 线程 + 移除弹窗 | codex-companion.mjs + rescue.md + agent | ~10 行 |
 | 一键修复脚本 | codex-sandbox-fix.sh | 71 行 |
 
-全部改动不到 200 行代码，解决了双 AI 协作中最影响体验的五个痛点。
+代理协议修复是根因，解决后 `/codex:rescue` 和 `codex exec` 两条路径均恢复正常。其余防御性改进保留了心跳、超时、ephemeral 等机制，让双 AI 协作可观测、可恢复。
 
 核心教训：
-- **App Server 的沙箱 ≠ CLI 的沙箱**。即使表面上参数相同，底层行为可能完全不同（macOS Seatbelt 下的 `workspace-write` bug）
+- **AI Agent 协作的故障排查需要追到协议层**。表象可能是文件落不了盘、命令执行失败，实际根因可能在 API 代理的协议翻译层。App Server 模式与 `codex exec` 模式走的是同一条 API 链路，一条通一条不通时，问题往往在中间层
 - **AI Agent 协作需要心跳**。LLM 思考期间完全静默，用户需要定期反馈才知道系统没死
 - **默认 ephemeral**。子任务应该用完即弃，残留的线程和弹窗会增加认知负担
-- **写修复脚本**。Plugin 更新可能覆盖修改，自动化恢复是必要的
+- **保留防御性修复**。即使根因已解决，sandbox 级别提升、超时保护、心跳机制这些防御性改进仍然有价值——下次遇到其他兼容性问题时，它们能让故障可观测、可恢复
 
 
 **相关资源**：
 
 - [Codex Plugin for Claude Code](https://github.com/openai/codex-plugin-cc) — OpenAI 官方插件
-- [Codex CLI 文档](https://developers.openai.com/codex/cli/) — App Server 协议参考
-- [Codex Sandbox Issue #14068](https://github.com/openai/codex/issues/14068) — App Server sandbox bug
+- [Codex CLI 文档](https://developers.openai.com/codex/cli/) — `codex exec` 和 App Server 协议参考
+- [dsv4-cc-proxy](https://github.com/HosheaLi/dsv4-cc-proxy) — DeepSeek V4 → Responses API 代理（本次修复的核心）
 - [Codex Permissions 文档](https://developers.openai.com/codex/permissions) — 三种沙箱模式说明
+- [Codex Sandbox Issue #14068](https://github.com/openai/codex/issues/14068) — macOS Seatbelt 沙箱已知问题（最终确认非本次根因，但相关）
 
 如果你也在用 Claude Code + Codex 的组合，或者有更好的协作方案，欢迎在评论区交流。
