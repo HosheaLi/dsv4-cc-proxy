@@ -173,8 +173,9 @@ def _watchdog_main(args):
     child_cmd = [sys.executable, "-m", "dsv4_cc_proxy", "--pidfile", pidfile]
 
     restart_count = 0
-    while not shutdown_flag["shutdown"] and restart_count <= max_restarts:
-        logger.info("Starting proxy child (attempt %d/%d)", restart_count + 1, max_restarts)
+    max_attempts = max_restarts + 1  # 初始启动 + N 次重启
+    while not shutdown_flag["shutdown"] and restart_count < max_attempts:
+        logger.info("Starting proxy child (attempt %d/%d)", restart_count + 1, max_attempts)
 
         proc = subprocess.Popen(
             child_cmd, env=child_env,
@@ -199,8 +200,9 @@ def _watchdog_main(args):
 
         # 子进程意外退出
         restart_count += 1
-        if restart_count > max_restarts:
-            logger.critical("Watchdog: child crashed %d times, giving up.", restart_count)
+        if restart_count >= max_restarts:
+            logger.critical("Watchdog: child crashed %d times (max %d), giving up.",
+                            restart_count, max_restarts)
             sys.stderr.write(
                 f"[FATAL] Proxy crashed {restart_count} times (max {max_restarts}). Exiting.\n"
             )

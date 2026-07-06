@@ -166,8 +166,8 @@ async def _connect_with_retry(
                     logger.warning("[RETRY] %s connect attempt %d/%d failed: %s",
                                    target, attempt + 1, max_attempts, e)
                     await asyncio.sleep(delay)
-            except httpx.HTTPStatusError:
-                raise
+            # stream=True 时 httpx 不因 4xx/5xx 抛 HTTPStatusError，
+            # 由调用方通过 upstream_resp.status_code 自行处理
 
     logger.error("All upstream targets exhausted. Last error: %s", last_error)
     return None
