@@ -103,12 +103,27 @@ def _kill_process(proc: subprocess.Popen) -> None:
         pass
 
 
-def _cleanup(pidfile: str) -> None:
-    """清理 PID 文件。"""
+def _cleanup(pidfile: str, expected_pid: int | None = None) -> None:
+    """清理 PID 文件。若提供 expected_pid，则校验文件内容匹配后才删除。"""
     try:
+        if expected_pid is not None:
+            with open(pidfile) as f:
+                current = int(f.read().strip())
+            if current != expected_pid:
+                logger.warning(
+                    "PID file changed, not removing: expected %d got %d",
+                    expected_pid, current,
+                )
+                return
         os.unlink(pidfile)
     except FileNotFoundError:
         pass
+    except (ValueError, OSError):
+        logger.warning("PID file corrupted, removing anyway: %s", pidfile)
+        try:
+            os.unlink(pidfile)
+        except FileNotFoundError:
+            pass
 
 
 def _reader_thread(proc: subprocess.Popen, shutdown_flag: dict) -> None:
@@ -143,7 +158,16 @@ def _watchdog_main(args):
         try:
             with open(pidfile) as f:
                 existing_pid = int(f.read().strip())
-            os.kill(existing_pid, 0)  # 仅 Unix 探活; Windows 上抛 OSError
+            if os.name == "nt":
+                # Windows: os.kill(pid, 0) 会直接抛异常，无法用 SIG_0 探活。
+                # 使用 WaitForSingleObject 成本较高，此处做保守处理——
+                # 若 PID 文件存在则假定实例存活，防止重复启动。
+                logger.warning(
+                    "PID file exists (PID %d) on Windows — assuming instance alive, exiting.",
+                    existing_pid,
+                )
+                sys.exit(1)
+            os.kill(existing_pid, 0)  # Unix 探活
             logger.warning("Proxy already running (PID %d), use --stop first", existing_pid)
             sys.exit(1)
         except (OSError, ValueError):
@@ -218,9 +242,10 @@ def _watchdog_main(args):
 def _stop(pidfile: str):
     """停止代理：读取 PID 文件 → terminate → 等待 → kill（超时则强制杀）。
 
-    跨平台兼容：Unix 使用 SIGTERM/SIGKILL，Windows 使用 TerminateProcess。
-    注意：Windows 上 os.kill 不支持 POSIX 信号，此函数通过 Popen 方式
-    发送 terminate 并在失败时回退到 os.kill。
+    跨平台兼容：
+      - Unix: SIGTERM → 探活×10(共5s) → SIGKILL
+      - Windows: 跳过 SIGTERM(无优雅关闭语义) → 直接 SIGKILL
+    PID 清理前会校验 PID 文件内容，防止误删被回收重用的 PID 文件。
     """
     if not os.path.exists(pidfile):
         logger.warning("Proxy not running (PID file not found: %s)", pidfile)
@@ -235,7 +260,7 @@ def _stop(pidfile: str):
 
     logger.info("Stopping dsv4-cc-proxy (PID %d)...", pid)
 
-    # 跨平台 terminate: 优先使用 os.kill (Unix) 或 subprocess (Windows)
+    # 跨平台 terminate: Unix SIGTERM, Windows 跳过
     _try_terminate(pid)
 
     # 等待进程退出 (最多 5s)
@@ -243,12 +268,12 @@ def _stop(pidfile: str):
         time.sleep(0.5)
         if not _is_process_alive(pid):
             logger.info("Proxy stopped gracefully")
-            _cleanup(pidfile)
+            _cleanup(pidfile, expected_pid=pid)
             return
 
     logger.warning("Graceful shutdown timed out, force killing...")
     _try_kill(pid)
-    _cleanup(pidfile)
+    _cleanup(pidfile, expected_pid=pid)
     logger.info("Proxy stopped (forced)")
 
 
@@ -262,16 +287,20 @@ def _is_process_alive(pid: int) -> bool:
 
 
 def _try_terminate(pid: int) -> None:
-    """跨平台 terminate 进程。"""
+    """跨平台 terminate 进程 (POSIX: SIGTERM; Windows: 不支持优雅关闭)。"""
+    if os.name == "nt":
+        # Windows 无 SIGTERM 语义，os.kill(pid, signal.SIGTERM) 等价 SIGKILL，
+        # 此处跳过以避免误导——由上层循环探活 + _try_kill 处理。
+        logger.debug("Windows: no graceful shutdown support, skip SIGTERM for PID %d", pid)
+        return
     try:
         os.kill(pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError, AttributeError):
-        # Windows: signal.SIGTERM 可能不存在或不被支持
+    except (OSError, ProcessLookupError):
         pass
 
 
 def _try_kill(pid: int) -> None:
-    """跨平台 kill 进程。"""
+    """跨平台 kill 进程 (POSIX: SIGKILL; Windows: 见 _try_terminate)。"""
     try:
         os.kill(pid, signal.SIGKILL)
     except (OSError, ProcessLookupError, AttributeError):

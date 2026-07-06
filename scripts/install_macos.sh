@@ -158,7 +158,7 @@ if curl -sf http://localhost:16889/health >/dev/null 2>&1; then
     echo -e "${GREEN}[OK] Proxy is running!${NC}"
     echo ""
     echo "  Health response:"
-    curl -s http://localhost:16889/health | python3 -m json.tool 2>/dev/null || true
+    curl -s http://localhost:16889/health | "$PYTHON" -m json.tool 2>/dev/null || true
 else
     echo -e "${YELLOW}[WARN] Health check failed.${NC}"
     echo "  Check logs:  tail -f $LOG_DIR/proxy.log"
