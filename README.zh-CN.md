@@ -4,7 +4,7 @@
 
 **让 DeepSeek V4 与 Claude Code 无缝配合**
 
-Anthropic API 兼容性代理，修复 DeepSeek V4 的 3 个不兼容问题。
+Anthropic API 兼容性代理，内置**看门狗自愈**、**上游弹性重试**和**跨平台支持**。
 
 ```
 Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthropic
@@ -20,6 +20,17 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 </div>
 
 ---
+
+## v2.1.0 新特性
+
+| 功能 | 说明 |
+|------|------|
+| 🔄 **看门狗模式** | `--watchdog` 标志启用崩溃自动恢复——父进程监控子进程，崩溃后自动重启 |
+| 🔁 **上游重试 + 回退** | 指数退避自动重试 + 可选回退地址（`PROXY_UPSTREAM_FALLBACK`），DeepSeek 不可达时自动切换 |
+| 🪟 **Windows 兼容性** | PID 文件自动适配 `%TEMP%`，启动错误通过 stderr + 事件日志可见 |
+| 🍎 **macOS 安装脚本** | `scripts/install_macos.sh` 自动检测 Python，处理 Homebrew 外部管理环境，自动回退到 venv |
+| 🚨 **端口冲突检测** | 启动前主动检测端口占用——避免静默失败和看门狗重启循环 |
+| 🔍 **启动失败可见性** | 全平台：致命错误输出到 stderr。Windows：同时写入事件日志 |
 
 ## 为什么需要这个代理
 
@@ -124,10 +135,16 @@ docker compose up -d
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
 | `PROXY_UPSTREAM` | `https://api.deepseek.com/anthropic` | DeepSeek API 地址 |
+| `PROXY_UPSTREAM_FALLBACK` | *(空=关闭)* | 主上游不可达时的备选回退地址。需兼容 Anthropic API |
+| `PROXY_UPSTREAM_RETRY_COUNT` | `2` | 每个上游目标的重试次数 |
+| `PROXY_UPSTREAM_RETRY_BASE_DELAY` | `1.0` | 指数退避基础延迟（秒）：`delay = base × 2^attempt` |
 | `PROXY_HOST` | `127.0.0.1` | 监听地址 |
 | `PROXY_PORT` | `16889` | 监听端口 |
 | `PROXY_LOG_LEVEL` | `warning` | 日志级别（调试用 `info`） |
 | `PROXY_DUMP_DIR` | *(空=关闭)* | 流量捕获目录。⚠ 含用户对话数据 |
+| `PROXY_WATCHDOG_MAX_RESTARTS` | `5` | 看门狗放弃前的最大重启次数 |
+| `PROXY_WATCHDOG_RESTART_DELAY` | `2` | 重启间隔秒数 |
+| `PROXY_WATCHDOG_POLL_INTERVAL` | `0.5` | 子进程存活轮询间隔秒数 |
 
 > Codex 使用请参考上方 [Codex 支持](#codex-支持) 章节。
 
@@ -145,26 +162,51 @@ docker compose up -d
 
 ### macOS（launchd 自启）
 
+**推荐：使用安装脚本一键部署：**
+
+```bash
+# 自动检测 Python，必要时创建 venv，安装为 LaunchAgent
+bash scripts/install_macos.sh
+
+# 或手动指定 Python 路径
+bash scripts/install_macos.sh /path/to/python3
+```
+
+**手动安装：**
+
 ```bash
 # 先编辑 plist 文件中路径为你的实际环境！
 cp scripts/com.deepseek.thinking-proxy.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.deepseek.thinking-proxy.plist
 ```
 
-**注意：** 需修改 plist 中的路径（如 `/Users/yourname/.claude/proxy/`）以匹配你的配置。
+> **注意：** 停止 launchd 管理的代理前需先卸载：`launchctl unload ~/Library/LaunchAgents/com.deepseek.thinking-proxy.plist`。直接使用 `--stop` 无效，因为 `KeepAlive` 会自动重启。
 
 ### Windows（计划任务自启）
 
 ```batch
 :: 一键安装（开机自启、崩溃重启）
-scripts\install_windows_service.ps1 -Install
+powershell -ExecutionPolicy RemoteSigned -File scripts\install_windows_service.ps1 -Install
 
 :: 手动启动终端模式
 scripts\start.bat
 
 :: 或使用 PowerShell
-scripts\start.ps1
+powershell -ExecutionPolicy RemoteSigned -File scripts\start.ps1
 ```
+
+> **注意：** `--stop` 依赖 POSIX 信号，**Windows 上不支持**。请使用 `Ctrl+C` 或 `taskkill`。
+
+### 看门狗模式（所有平台）
+
+裸进程环境（无平台守护进程时）推荐使用：
+
+```bash
+dsv4-cc-proxy --watchdog
+# 子进程崩溃 → 自动重启（最多 PROXY_WATCHDOG_MAX_RESTARTS 次）
+```
+
+> **注意：** 使用 launchd（macOS）、计划任务（Windows）或 Docker restart 策略时不需要 `--watchdog`——平台守护进程已经处理了进程恢复。
 
 ### Linux（systemd）
 
@@ -230,7 +272,7 @@ pytest tests/ -v
 
 ```bash
 curl http://localhost:16889/health
-# → {"status":"ok","version":"2.0.0","upstream":"https://api.deepseek.com/anthropic"}
+# → {"status":"ok","version":"2.1.0","upstream":"https://api.deepseek.com/anthropic","upstream_fallback":null}
 ```
 
 ## 目录结构
@@ -260,7 +302,8 @@ curl http://localhost:16889/health
 │   ├── start.bat                    # Windows 批处理启动
 │   ├── start.ps1                    # PowerShell 启动
 │   ├── install_windows_service.ps1  # Windows 计划任务安装
-│   └── com.deepseek.thinking-proxy.plist  # macOS launchd（可选）
+│   ├── install_macos.sh             # macOS LaunchAgent 安装脚本
+│   └── com.deepseek.thinking-proxy.plist  # macOS launchd 模板
 ├── Dockerfile                       # Docker 多阶段构建
 ├── docker-compose.yml               # Docker Compose
 ├── pyproject.toml                   # 构建配置、entry point
