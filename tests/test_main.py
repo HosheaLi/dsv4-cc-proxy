@@ -1,14 +1,97 @@
 """dsv4-cc-proxy CLI 入口单元测试。
 
-覆盖: stop/normal startup/already running/stale pidfile/error handling。
+覆盖: stop/normal startup/already running/stale pidfile/error handling/
+       watchdog mode/windows portability。
+
 遵循纯函数 AAA 模式: Arrange → Act → Assert。
 
 运行: python3 -m pytest tests/test_main.py -v
 """
 
 import signal
+import subprocess
+import sys
+from unittest.mock import MagicMock
 
 import pytest
+
+
+# ============== Phase 1: helper functions ==============
+
+
+def test_default_pidfile_windows(monkeypatch):
+    """Windows 上默认 PID 文件路径使用 %TEMP%。"""
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setenv("TEMP", "C:\\Users\\test\\AppData\\Local\\Temp")
+
+    from dsv4_cc_proxy.__main__ import _default_pidfile
+
+    path = _default_pidfile()
+    assert "dsv4-cc-proxy.pid" in path
+    assert "AppData" in path
+
+
+def test_default_pidfile_windows_no_env(monkeypatch):
+    """Windows 上 TEMP/TMP 均不存在时 fallback 到用户主目录。"""
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.delenv("TEMP", raising=False)
+    monkeypatch.delenv("TMP", raising=False)
+
+    from dsv4_cc_proxy.__main__ import _default_pidfile
+
+    path = _default_pidfile()
+    assert "dsv4-cc-proxy.pid" in path
+    assert path != "."  # 不应该 fallback 到当前目录
+
+
+def test_default_pidfile_unix(monkeypatch):
+    """Unix 上默认 PID 文件路径使用 /tmp/。"""
+    monkeypatch.setattr("os.name", "posix")
+
+    from dsv4_cc_proxy.__main__ import _default_pidfile
+
+    path = _default_pidfile()
+    assert path == "/tmp/dsv4-cc-proxy.pid"
+
+
+def test_port_available(monkeypatch):
+    """_check_port_available 对可用端口返回 True。"""
+    from dsv4_cc_proxy.__main__ import _check_port_available
+    import socket
+
+    # 找一个可用端口
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    assert _check_port_available("127.0.0.1", port) is True
+
+
+def test_windows_event_log_non_windows(monkeypatch):
+    """非 Windows 上 _log_windows_event 为空操作。"""
+    monkeypatch.setattr("os.name", "posix")
+
+    from dsv4_cc_proxy.__main__ import _log_windows_event
+
+    _log_windows_event("test")  # 不应该崩溃
+
+
+def test_windows_event_log_sanitizes_quotes(monkeypatch):
+    """验证 PowerShell 单引号被转义。"""
+    monkeypatch.setattr("os.name", "nt")
+    run_calls = []
+
+    def mock_run(*args, **kwargs):
+        run_calls.append(args[0])
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    from dsv4_cc_proxy.__main__ import _log_windows_event
+
+    _log_windows_event("Error: can't connect")
+    assert len(run_calls) == 1
+    cmd = " ".join(run_calls[0])
+    assert "can''t" in cmd  # 单引号被转义为 ''
 
 
 def test_stop_pidfile_not_found(monkeypatch):
@@ -210,3 +293,154 @@ def test_stop_pidfile_corrupted(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc_info:
         main()
     assert exc_info.value.code == 1
+
+
+# ============== Phase 3: watchdog ==============
+
+
+class TestWatchdog:
+    """dsv4-cc-proxy --watchdog 看门狗模式测试。"""
+
+    def test_terminate_process_calls_terminate(self):
+        """_terminate_process 调用 Popen.terminate()。"""
+        from dsv4_cc_proxy.__main__ import _terminate_process
+
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        _terminate_process(mock_proc)
+        mock_proc.terminate.assert_called_once()
+
+    def test_kill_process_calls_kill(self):
+        """_kill_process 调用 Popen.kill()。"""
+        from dsv4_cc_proxy.__main__ import _kill_process
+
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        _kill_process(mock_proc)
+        mock_proc.kill.assert_called_once()
+
+    def test_cleanup_removes_pidfile(self, tmp_path):
+        """_cleanup 删除 PID 文件。"""
+        from dsv4_cc_proxy.__main__ import _cleanup
+
+        pidfile = tmp_path / "test.pid"
+        pidfile.write_text("12345")
+        _cleanup(str(pidfile))
+        assert not pidfile.exists()
+
+    def test_cleanup_missing_pidfile_no_error(self, tmp_path):
+        """_cleanup 对不存在的 PID 文件不报错。"""
+        from dsv4_cc_proxy.__main__ import _cleanup
+
+        _cleanup(str(tmp_path / "nonexistent.pid"))  # 不应崩溃
+
+    def test_graceful_shutdown_timeout_triggers_kill(self):
+        """优雅关闭超时后触发 proc.kill()。"""
+        from dsv4_cc_proxy.__main__ import _graceful_shutdown_child
+
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        # 第一次 wait(timeout=5) 超时, 第二次 wait(timeout=2) 正常返回
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="test", timeout=5),
+            None,
+        ]
+
+        _graceful_shutdown_child(mock_proc)
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_called_once()
+
+    def test_get_watchdog_config_defaults(self, monkeypatch):
+        """默认看门狗配置预设值正确。"""
+        from dsv4_cc_proxy.__main__ import _get_watchdog_config
+
+        monkeypatch.delenv("PROXY_WATCHDOG_MAX_RESTARTS", raising=False)
+        monkeypatch.delenv("PROXY_WATCHDOG_RESTART_DELAY", raising=False)
+        monkeypatch.delenv("PROXY_WATCHDOG_POLL_INTERVAL", raising=False)
+
+        max_restarts, restart_delay, poll_interval = _get_watchdog_config()
+        assert max_restarts == 5
+        assert restart_delay == 2
+        assert poll_interval == 0.5
+
+    def test_watchdog_spawns_child(self, monkeypatch, tmp_path):
+        """Watchdog 通过 subprocess.Popen 生成子进程。"""
+        popen_calls = []
+
+        class _FakeProc:
+            def __init__(self, *a, **kw):
+                self.pid = 12345
+                popen_calls.append(kw)
+            def poll(self):
+                return 0
+            def wait(self, **kw):
+                pass
+            @property
+            def returncode(self):
+                return 0
+
+        pidfile = tmp_path / "watchdog.pid"
+
+        monkeypatch.setattr("sys.argv", ["proxy.py", "--watchdog", "--pidfile", str(pidfile)])
+        monkeypatch.setattr("subprocess.Popen", _FakeProc)
+        monkeypatch.setattr("threading.Thread", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        from dsv4_cc_proxy.__main__ import main
+
+        main()
+        assert len(popen_calls) >= 1
+        assert popen_calls[0]["env"]["DSV4CC_WATCHDOG_CHILD"] == "1"
+
+    def test_watchdog_max_restarts_exceeded(self, monkeypatch, tmp_path):
+        """看门狗达到最大重启次数后放弃并退出。"""
+        class _CrashingProc:
+            def __init__(self, *a, **kw):
+                pass
+            def poll(self):
+                return 1
+            def wait(self, **kw):
+                pass
+            @property
+            def returncode(self):
+                return 1
+
+        pidfile = tmp_path / "watchdog.pid"
+
+        monkeypatch.setattr("sys.argv", ["proxy.py", "--watchdog", "--pidfile", str(pidfile)])
+        monkeypatch.setattr("subprocess.Popen", _CrashingProc)
+        monkeypatch.setattr("threading.Thread", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        monkeypatch.setattr("dsv4_cc_proxy.__main__._get_watchdog_config",
+                            lambda: (2, 1, 0.1))
+
+        from dsv4_cc_proxy.__main__ import main
+
+        main()  # 不应崩溃，应正常退出
+
+    def test_watchdog_child_skips_pidfile(self, monkeypatch, tmp_path):
+        """看门狗子进程 (DSV4CC_WATCHDOG_CHILD=1) 跳过 PID 文件管理。"""
+        pidfile = tmp_path / "child.pid"
+
+        monkeypatch.setattr("sys.argv", ["proxy.py", "--pidfile", str(pidfile)])
+        monkeypatch.setenv("DSV4CC_WATCHDOG_CHILD", "1")
+        monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
+        monkeypatch.setattr("dsv4_cc_proxy.__main__._check_port_available", lambda h, p: True)
+        monkeypatch.setattr("os.unlink", lambda p: None)
+
+        from dsv4_cc_proxy.__main__ import main
+
+        main()
+        # 子进程不应写入 PID 文件
+        assert not pidfile.exists()
+
+    def test_watchdog_checks_existing_instance(self, monkeypatch, tmp_path):
+        """看门狗启动时若 PID 文件存在且有活跃进程则拒绝启动。"""
+        pidfile = tmp_path / "watchdog.pid"
+        pidfile.write_text("99999")
+
+        monkeypatch.setattr("sys.argv", ["proxy.py", "--watchdog", "--pidfile", str(pidfile)])
+        monkeypatch.setattr("os.kill", lambda pid, sig: None)  # 探活成功
+
+        from dsv4_cc_proxy.__main__ import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1

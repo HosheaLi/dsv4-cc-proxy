@@ -71,6 +71,148 @@ def _log_windows_event(message: str) -> None:
         pass  # best-effort: Event Source 可能不存在, 静默忽略
 
 
+# ---- 看门狗模式 ----
+
+_WATCHDOG_ENV_VAR = "DSV4CC_WATCHDOG_CHILD"
+_WATCHDOG_DEFAULT_MAX_RESTARTS = 5
+_WATCHDOG_DEFAULT_RESTART_DELAY = 2
+_WATCHDOG_DEFAULT_POLL_INTERVAL = 0.5
+
+
+def _get_watchdog_config() -> tuple[int, int, float]:
+    """从环境变量读取看门狗配置。"""
+    max_restarts = int(os.getenv("PROXY_WATCHDOG_MAX_RESTARTS", str(_WATCHDOG_DEFAULT_MAX_RESTARTS)))
+    restart_delay = int(os.getenv("PROXY_WATCHDOG_RESTART_DELAY", str(_WATCHDOG_DEFAULT_RESTART_DELAY)))
+    poll_interval = float(os.getenv("PROXY_WATCHDOG_POLL_INTERVAL", str(_WATCHDOG_DEFAULT_POLL_INTERVAL)))
+    return max_restarts, restart_delay, poll_interval
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    """跨平台安全的进程终止 (POSIX: SIGTERM; Windows: TerminateProcess)。"""
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
+
+
+def _kill_process(proc: subprocess.Popen) -> None:
+    """跨平台安全的强制杀进程 (POSIX: SIGKILL; Windows: TerminateProcess)。"""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _cleanup(pidfile: str) -> None:
+    """清理 PID 文件。"""
+    try:
+        os.unlink(pidfile)
+    except FileNotFoundError:
+        pass
+
+
+def _reader_thread(proc: subprocess.Popen, shutdown_flag: dict) -> None:
+    """后台消费子进程 stdout，防止管道缓冲区填满导致子进程阻塞。"""
+    try:
+        for line in proc.stdout:
+            if shutdown_flag.get("shutdown"):
+                break
+            logger.debug("[child] %s", line.rstrip().decode("utf-8", errors="replace"))
+    except Exception:
+        pass  # 管道关闭时静默退出
+
+
+def _graceful_shutdown_child(proc: subprocess.Popen) -> None:
+    """优雅关闭子进程: terminate → 等待 5s → kill。"""
+    _terminate_process(proc)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        logger.warning("Child did not exit, force killing...")
+        _kill_process(proc)
+        proc.wait(timeout=2)
+
+
+def _watchdog_main(args):
+    """看门狗父进程——生成子进程并监控崩溃重启。"""
+    pidfile = args.pidfile
+    max_restarts, restart_delay, poll_interval = _get_watchdog_config()
+
+    # 保留原有实例检查逻辑 (防止 PID 冲突)
+    if os.path.exists(pidfile):
+        try:
+            with open(pidfile) as f:
+                existing_pid = int(f.read().strip())
+            os.kill(existing_pid, 0)  # 仅 Unix 探活; Windows 上抛 OSError
+            logger.warning("Proxy already running (PID %d), use --stop first", existing_pid)
+            sys.exit(1)
+        except (OSError, ValueError):
+            os.unlink(pidfile)
+
+    # 写入看门狗 PID
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+
+    # 注册信号处理
+    shutdown_flag = {"shutdown": False}
+
+    def _on_signal(signum, frame):
+        shutdown_flag["shutdown"] = True
+        logger.info("Watchdog received signal %s, initiating shutdown...", signum)
+
+    # 跨平台信号注册: Windows 不支持 SIGTERM
+    signal.signal(signal.SIGINT, _on_signal)
+    try:
+        signal.signal(signal.SIGTERM, _on_signal)
+    except AttributeError:
+        pass  # Windows: SIGTERM 不存在，SIGINT 已覆盖 Ctrl+C
+
+    # 子进程环境与命令行. 子进程通过 DSV4CC_WATCHDOG_CHILD=1 识别身份.
+    child_env = os.environ.copy()
+    child_env[_WATCHDOG_ENV_VAR] = "1"
+    child_cmd = [sys.executable, "-m", "dsv4_cc_proxy", "--pidfile", pidfile]
+
+    restart_count = 0
+    while not shutdown_flag["shutdown"] and restart_count <= max_restarts:
+        logger.info("Starting proxy child (attempt %d/%d)", restart_count + 1, max_restarts)
+
+        proc = subprocess.Popen(
+            child_cmd, env=child_env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+
+        # 启动后台线程消费子进程输出，防止管道阻塞
+        reader = threading.Thread(target=_reader_thread, args=(proc, shutdown_flag), daemon=True)
+        reader.start()
+
+        # 轮询子进程存活
+        while not shutdown_flag["shutdown"]:
+            if proc.poll() is not None:
+                break  # 子进程退出
+            time.sleep(poll_interval)
+
+        reader.join(timeout=1)  # 等待 reader 线程自然退出
+
+        if shutdown_flag["shutdown"]:
+            _graceful_shutdown_child(proc)
+            break
+
+        # 子进程意外退出
+        restart_count += 1
+        if restart_count > max_restarts:
+            logger.critical("Watchdog: child crashed %d times, giving up.", restart_count)
+            sys.stderr.write(
+                f"[FATAL] Proxy crashed {restart_count} times (max {max_restarts}). Exiting.\n"
+            )
+            break
+
+        logger.warning("Watchdog: child exited (code %d), restarting in %ds...",
+                       proc.returncode, restart_delay)
+        time.sleep(restart_delay)
+
+    _cleanup(pidfile)
+
+
 def _stop(pidfile: str):
     """停止代理：读取 PID 文件 → SIGTERM → 等待 → SIGKILL（超时则强制杀）。"""
     if not os.path.exists(pidfile):
@@ -123,6 +265,10 @@ def main():
         "--stop", action="store_true", help="Stop running proxy"
     )
     parser.add_argument(
+        "--watchdog", action="store_true",
+        help="Enable watchdog mode: monitor child process and auto-restart on crash",
+    )
+    parser.add_argument(
         "--pidfile", default=PIDFILE_DEFAULT,
         help=f"PID file path (default: {PIDFILE_DEFAULT})",
     )
@@ -132,6 +278,12 @@ def main():
         _stop(args.pidfile)
         return
 
+    if args.watchdog:
+        _watchdog_main(args)
+        return
+
+    # 看门狗子进程: 跳过 PID 文件管理 (由父进程负责)
+    is_watchdog_child = os.environ.get(_WATCHDOG_ENV_VAR) == "1"
     pidfile = args.pidfile
     port = _get_port()
 
@@ -142,8 +294,8 @@ def main():
         sys.stderr.flush()
         sys.exit(1)
 
-    # 检查是否已有实例在运行
-    if os.path.exists(pidfile):
+    # 检查是否已有实例在运行 (看门狗子进程跳过)
+    if not is_watchdog_child and os.path.exists(pidfile):
         with open(pidfile) as f:
             try:
                 pid = int(f.read().strip())
@@ -153,9 +305,10 @@ def main():
             except (OSError, ValueError):
                 os.unlink(pidfile)
 
-    # 写入 PID 文件
-    with open(pidfile, "w") as f:
-        f.write(str(os.getpid()))
+    # 写入 PID 文件 (看门狗子进程跳过)
+    if not is_watchdog_child:
+        with open(pidfile, "w") as f:
+            f.write(str(os.getpid()))
 
     logger.info("DeepSeek Thinking Proxy v%s → %s:%d (PID %d)", VERSION, HOST, port, os.getpid())
     if DUMP_DIR:
@@ -179,10 +332,11 @@ def main():
             _log_windows_event(str(sys.exc_info()[1]))
         raise
     finally:
-        try:
-            os.unlink(pidfile)
-        except FileNotFoundError:
-            pass
+        if not is_watchdog_child:
+            try:
+                os.unlink(pidfile)
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":
