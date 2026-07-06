@@ -7,6 +7,7 @@
 import json
 
 from dsv4_cc_proxy.proxy import (
+    _consolidate_system_messages,
     _has_thinking,
     _has_tool_use,
     _inject_thinking_blocks,
@@ -476,3 +477,198 @@ def test_normalize_date_unchanged_match():
     # 其他位置的 / 不应被替换
     assert _normalize_text("2026/06/30") == "2026/06/30"  # 无前缀，不替换
     assert _normalize_text("date is 2026/06/30") == "date is 2026/06/30"  # 不全匹配
+
+
+# =============================================================================
+# 组 5: messages[] 中 role:system 消息合并到顶层 system
+# =============================================================================
+
+
+def test_consolidate_no_system_messages():
+    """无 system 角色消息 → 不做修改。"""
+    data = {"messages": [{"role": "user", "content": "hi"}]}
+    modified, count = _consolidate_system_messages(data)
+    assert not modified
+    assert count == 0
+    assert len(data["messages"]) == 1
+
+
+def test_consolidate_single_system_at_start():
+    """开头一条 system 消息 + 顶层 system 字符串 → 合并到 system。"""
+    data = {
+        "system": "You are a helper.",
+        "messages": [
+            {"role": "system", "content": "Use English only."},
+            {"role": "user", "content": "hello"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert count == 1
+    assert len(data["messages"]) == 1
+    assert data["messages"][0]["role"] == "user"
+    assert "You are a helper." in data["system"]
+    assert "Use English only." in data["system"]
+
+
+def test_consolidate_system_mid_conversation():
+    """系统消息在对话中间 → 提取并追加到顶层 system。"""
+    data = {
+        "system": "Initial system prompt.",
+        "messages": [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "system", "content": "Now switch to English."},
+            {"role": "user", "content": "Q2"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert count == 1
+    assert len(data["messages"]) == 3
+    roles = [m["role"] for m in data["messages"]]
+    assert "system" not in roles
+    assert "Now switch to English." in data["system"]
+
+
+def test_consolidate_multiple_system_messages():
+    """多条系统消息 → 全部提取并按顺序追加。"""
+    data = {
+        "system": "Base.",
+        "messages": [
+            {"role": "system", "content": "First."},
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "Second."},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert count == 2
+    assert len(data["messages"]) == 1
+    first_pos = data["system"].index("First.")
+    second_pos = data["system"].index("Second.")
+    assert first_pos < second_pos
+
+
+def test_consolidate_system_content_as_blocks():
+    """系统消息 content 为内容块列表 → 提取 text 块。"""
+    data = {
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "Block one."},
+                    {"type": "text", "text": "Block two."},
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert count == 1
+    assert "Block one." in data["system"]
+    assert "Block two." in data["system"]
+
+
+def test_consolidate_no_top_level_system():
+    """无顶层 system 字段 → 创建新 system 字段。"""
+    data = {
+        "messages": [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert data["system"] == "Be helpful."
+    assert len(data["messages"]) == 1
+
+
+def test_consolidate_top_level_system_as_blocks():
+    """顶层 system 为内容块列表 → 追加 text 块。"""
+    data = {
+        "system": [{"type": "text", "text": "Base."}],
+        "messages": [
+            {"role": "system", "content": "Extra."},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert len(data["system"]) == 2
+    assert data["system"][1]["type"] == "text"
+    assert "Extra." in data["system"][1]["text"]
+
+
+def test_consolidate_empty_system_content():
+    """系统消息 content 为空 → 不计入合并但仍从 messages 移除。"""
+    data = {
+        "messages": [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert count == 1
+    assert len(data["messages"]) == 1
+    # system 字段不应被创建（空内容跳过）
+    assert "system" not in data
+
+
+def test_consolidate_system_with_non_text_blocks():
+    """系统消息含非 text 块 → 只提取 text 块。"""
+    data = {
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "thinking", "thinking": "secret"},
+                    {"type": "text", "text": "Visible."},
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert "Visible." in data["system"]
+    assert "secret" not in data["system"]
+
+
+def test_consolidate_no_messages_key():
+    """无 messages 键 → 不做修改。"""
+    data = {"system": "Base.", "model": "deepseek-v4-pro"}
+    modified, count = _consolidate_system_messages(data)
+    assert not modified
+    assert count == 0
+
+
+def test_consolidate_preserves_remaining_order():
+    """移除系统消息后保留 user/assistant 消息的原始顺序。"""
+    data = {
+        "messages": [
+            {"role": "system", "content": "S1"},
+            {"role": "user", "content": "U1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "system", "content": "S2"},
+            {"role": "user", "content": "U2"},
+        ],
+    }
+    modified, count = _consolidate_system_messages(data)
+    assert modified
+    assert count == 2
+    roles = [m["role"] for m in data["messages"]]
+    assert roles == ["user", "assistant", "user"]
+    assert data["messages"][0]["content"] == "U1"
+    assert data["messages"][1]["content"] == "A1"
+    assert data["messages"][2]["content"] == "U2"
+
+
+def test_consolidate_messages_not_a_list():
+    """messages 不是 list → 不做修改。"""
+    data = {"messages": "not a list"}
+    modified, count = _consolidate_system_messages(data)
+    assert not modified
+    assert count == 0

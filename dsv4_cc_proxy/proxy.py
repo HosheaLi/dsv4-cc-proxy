@@ -158,6 +158,77 @@ def _normalize_quotes(obj: Any) -> Any:
     return obj
 
 
+# ---- 修复 3: messages[] 中 role:system 消息合并到顶层 system ----
+
+SYSTEM_MESSAGE_SEPARATOR = "\n\n---\n\n"
+
+
+def _consolidate_system_messages(data: dict) -> tuple:
+    """将 messages[] 中的 ``role: "system"`` 消息合并到顶层 ``system`` 字段。
+
+    从 messages 数组中提取所有 system 角色的消息，将其文本内容按出现
+    顺序追加到顶层 system 字段中（或创建 system 字段），然后从 messages
+    数组中移除这些消息。
+
+    这样处理是因为 DeepSeek API 只接受 ``user`` 和 ``assistant`` 两种角色，
+    无法识别 messages 数组中的 ``system`` 角色。而 Claude Code v2.1.154+
+    的 ``mid_conversation_system`` 功能会在 messages 中插入 system 消息。
+
+    Args:
+        data: 完整的请求字典（会被原地修改）。
+
+    Returns:
+        ``(modified: bool, count: int)`` — 是否修改了数据，以及提取了多少
+        条 system 消息。
+    """
+    if "messages" not in data or not isinstance(data["messages"], list):
+        return False, 0
+
+    system_texts = []
+    remaining = []
+    count = 0
+
+    for msg in data["messages"]:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            content = msg.get("content")
+            extracted = ""
+            if isinstance(content, str):
+                extracted = content
+            elif isinstance(content, list):
+                texts = [
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                extracted = "\n".join(texts)
+            if extracted.strip():
+                system_texts.append(extracted)
+            count += 1
+        else:
+            remaining.append(msg)
+
+    if count == 0:
+        return False, 0
+
+    data["messages"] = remaining
+
+    if not system_texts:
+        return True, count
+
+    consolidated = SYSTEM_MESSAGE_SEPARATOR.join(system_texts)
+
+    existing = data.get("system")
+    if existing is None:
+        data["system"] = consolidated
+    elif isinstance(existing, str):
+        data["system"] = existing + SYSTEM_MESSAGE_SEPARATOR + consolidated
+    elif isinstance(existing, list):
+        existing.append({"type": "text", "text": consolidated})
+    else:
+        data["system"] = str(existing) + SYSTEM_MESSAGE_SEPARATOR + consolidated
+
+    return True, count
+
+
 # ---- 修复 1: 请求端 thinking 注入 ----
 
 
@@ -463,6 +534,15 @@ async def proxy(request: Request):
             _dump_json("last_request.json", data)
 
             if is_chat_endpoint:
+                # 将 messages[] 中的 role:system 合并到顶层 system 字段，
+                # 因为 DeepSeek API 只接受 user/assistant 两种角色
+                modified, sys_count = _consolidate_system_messages(data)
+                if modified:
+                    logger.info(
+                        "[SYSTEM] consolidated %d system message(s) from messages array",
+                        sys_count,
+                    )
+
                 thinking_normalized = _normalize_thinking(data)
 
                 if _inject_thinking_blocks(data):
@@ -477,6 +557,9 @@ async def proxy(request: Request):
                 # 陷入无限思考循环耗尽 max_tokens 而无法输出 JSON
                 if _should_disable_thinking_for_structured_output(data):
                     data["thinking"] = {"type": "disabled"}
+                    thinking_normalized = True
+
+                if modified:
                     thinking_normalized = True
 
                 if thinking_normalized:
