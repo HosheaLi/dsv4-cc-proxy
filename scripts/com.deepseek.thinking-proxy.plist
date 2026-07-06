@@ -6,7 +6,7 @@
     <string>com.deepseek.thinking-proxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>__PYTHON__</string>
         <string>-m</string>
         <string>dsv4_cc_proxy</string>
     </array>
@@ -14,11 +14,11 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>/Users/lihaoxuan/.claude/proxy/proxy.log</string>
+    <string>__LOG_DIR__/proxy.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/lihaoxuan/.claude/proxy/proxy.log</string>
-    <key>WorkingDirectory</key>
-    <string>/Users/lihaoxuan/code/P14_dsv4ToCC</string>
+    <string>__LOG_DIR__/proxy.log</string>
 </dict>
 </plist>

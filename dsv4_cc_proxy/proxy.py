@@ -9,16 +9,21 @@
 #   PROXY_LOG_MAX_BYTES  日志文件最大字节数 (默认 10MB)
 #   PROXY_LOG_BACKUP_COUNT 轮转备份数量 (默认 3)
 #   PROXY_DUMP_DIR    流量捕获目录 (默认空=关闭, ⚠ 含敏感数据)
+#   PROXY_UPSTREAM_FALLBACK    上游不可达时回退 URL (默认空=关闭)
+#   PROXY_UPSTREAM_RETRY_COUNT 上游请求重试次数 (默认 2)
+#   PROXY_UPSTREAM_RETRY_BASE_DELAY 重试基础延迟秒数 (默认 1.0)
 #
 # 参考: https://api-docs.deepseek.com/guides/thinking_mode
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import logging.handlers
 import os
 import sys
+import tempfile
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -37,6 +42,9 @@ from dsv4_cc_proxy.codex.translate import translate_request
 # ---- 配置 ----
 
 DEEPSEEK_BASE = os.getenv("PROXY_UPSTREAM", "https://api.deepseek.com/anthropic")
+UPSTREAM_FALLBACK = os.getenv("PROXY_UPSTREAM_FALLBACK", "")
+UPSTREAM_RETRY_COUNT = int(os.getenv("PROXY_UPSTREAM_RETRY_COUNT", "2"))
+UPSTREAM_RETRY_BASE_DELAY = float(os.getenv("PROXY_UPSTREAM_RETRY_BASE_DELAY", "1.0"))
 HOST = os.getenv("PROXY_HOST", "127.0.0.1")
 def _get_port() -> int:
     """惰性解析 PORT 环境变量，避免模块级 import 时触发 sys.exit。"""
@@ -97,6 +105,74 @@ def _get_client() -> httpx.AsyncClient:
     return _shared_client
 
 
+# ---- 上游请求重试 ----
+
+_UPSTREAM_RETRYABLE = (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
+_UPSTREAM_CONNECT_RETRYABLE = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+async def _send_with_retry(
+    method: str, url: str, headers: dict, content: bytes,
+) -> httpx.Response | None:
+    """带重试+回退的非流式上游请求。所有尝试失败返回 None。"""
+    client = _get_client()
+    urls = [url]
+    if UPSTREAM_FALLBACK:
+        urls.append(UPSTREAM_FALLBACK)
+
+    last_error = None
+    for target in urls:
+        max_attempts = UPSTREAM_RETRY_COUNT + 1
+        for attempt in range(max_attempts):
+            try:
+                req = client.build_request(method=method, url=target, headers=headers, content=content)
+                resp = await client.send(req, stream=False)
+                return resp
+            except _UPSTREAM_RETRYABLE as e:
+                last_error = e
+                if attempt < UPSTREAM_RETRY_COUNT or (target != urls[-1] and UPSTREAM_FALLBACK):
+                    delay = UPSTREAM_RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning("[RETRY] %s attempt %d/%d failed: %s",
+                                   target, attempt + 1, max_attempts, e)
+                    await asyncio.sleep(delay)
+            except httpx.HTTPStatusError as e:
+                return e.response  # HTTP 错误不重试，返回响应对象让调用方翻译
+
+    logger.error("All upstream targets exhausted. Last error: %s", last_error)
+    return None
+
+
+async def _connect_with_retry(
+    method: str, url: str, headers: dict, content: bytes,
+) -> httpx.Response | None:
+    """仅对连接建立阶段重试（流式请求）。一旦开始接收数据，不再重试。"""
+    client = _get_client()
+    urls = [url]
+    if UPSTREAM_FALLBACK:
+        urls.append(UPSTREAM_FALLBACK)
+
+    last_error = None
+    for target in urls:
+        max_attempts = UPSTREAM_RETRY_COUNT + 1
+        for attempt in range(max_attempts):
+            try:
+                req = client.build_request(method=method, url=target, headers=headers, content=content)
+                resp = await client.send(req, stream=True)
+                return resp
+            except _UPSTREAM_CONNECT_RETRYABLE as e:
+                last_error = e
+                if attempt < UPSTREAM_RETRY_COUNT or (target != urls[-1] and UPSTREAM_FALLBACK):
+                    delay = UPSTREAM_RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning("[RETRY] %s connect attempt %d/%d failed: %s",
+                                   target, attempt + 1, max_attempts, e)
+                    await asyncio.sleep(delay)
+            except httpx.HTTPStatusError:
+                raise
+
+    logger.error("All upstream targets exhausted. Last error: %s", last_error)
+    return None
+
+
 # ---- 健康检查 ----
 
 
@@ -105,6 +181,7 @@ async def health(request: Request):
         "status": "ok",
         "version": VERSION,
         "upstream": DEEPSEEK_BASE,
+        "upstream_fallback": UPSTREAM_FALLBACK or None,
     })
 
 
@@ -570,20 +647,10 @@ async def proxy(request: Request):
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
-    client = _get_client()
-
-    try:
-        req = client.build_request(
-            method=method,
-            url=upstream_url,
-            headers=headers,
-            content=modified_body,
-        )
-        upstream_resp = await client.send(req, stream=True)
-    except Exception:
-        logger.exception("upstream request failed: %s %s", method, upstream_url)
+    upstream_resp = await _connect_with_retry(method, upstream_url, headers, modified_body)
+    if upstream_resp is None:
         return JSONResponse(
-            {"error": {"message": "upstream unavailable", "type": "proxy_error"}},
+            {"error": {"message": "upstream unavailable after retries", "type": "proxy_error"}},
             status_code=502,
         )
 
@@ -746,17 +813,13 @@ async def _iter_lines(response: httpx.Response):
 async def _handle_stream_response(chat_request: dict, headers: dict, upstream_url: str):
     """流式: Chat delta chunk -> SSE 事件流。"""
     chat_request["stream"] = True
-    client = _get_client()
 
-    try:
-        req = client.build_request(
-            method="POST", url=upstream_url, headers=headers,
-            content=json.dumps(chat_request, ensure_ascii=False).encode("utf-8"),
-        )
-        upstream_resp = await client.send(req, stream=True)
-    except Exception:
-        logger.exception("[CODEX] upstream request failed")
-        return _build_error(502, "proxy_error", "Failed to reach DeepSeek API")
+    upstream_resp = await _connect_with_retry(
+        "POST", upstream_url, headers,
+        json.dumps(chat_request, ensure_ascii=False).encode("utf-8"),
+    )
+    if upstream_resp is None:
+        return _build_error(502, "proxy_error", "Failed to reach DeepSeek API after retries")
 
     if upstream_resp.status_code != 200:
         body = b""
@@ -793,17 +856,13 @@ async def _handle_stream_response(chat_request: dict, headers: dict, upstream_ur
 async def _handle_non_stream_response(chat_request: dict, headers: dict, upstream_url: str):
     """非流式: 获取完整 Chat JSON -> 翻译为 Responses API JSON。"""
     chat_request["stream"] = False
-    client = _get_client()
 
-    try:
-        req = client.build_request(
-            method="POST", url=upstream_url, headers=headers,
-            content=json.dumps(chat_request, ensure_ascii=False).encode("utf-8"),
-        )
-        upstream_resp = await client.send(req, stream=False)
-    except Exception:
-        logger.exception("[CODEX] upstream request failed")
-        return _build_error(502, "proxy_error", "Failed to reach DeepSeek API")
+    upstream_resp = await _send_with_retry(
+        "POST", upstream_url, headers,
+        json.dumps(chat_request, ensure_ascii=False).encode("utf-8"),
+    )
+    if upstream_resp is None:
+        return _build_error(502, "proxy_error", "Failed to reach DeepSeek API after retries")
 
     if upstream_resp.status_code != 200:
         body = getattr(upstream_resp, 'content', b"")
@@ -911,6 +970,13 @@ async def lifespan(app):
     logger.info("shutting down")
     if _shared_client and not _shared_client.is_closed:
         await _shared_client.aclose()
+    # 清理诊断转储文件
+    for basename in ("last_codex_original_request.json", "last_codex_chat_request.json"):
+        fpath = os.path.join(tempfile.gettempdir(), basename)
+        try:
+            os.unlink(fpath)
+        except OSError:
+            pass
 
 
 def create_app() -> Starlette:

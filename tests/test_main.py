@@ -126,6 +126,7 @@ def test_main_stale_pidfile(monkeypatch, tmp_path):
         raise ProcessLookupError()
     monkeypatch.setattr("os.kill", mock_kill_oserror)
     monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
+    monkeypatch.setattr("dsv4_cc_proxy.__main__._check_port_available", lambda h, p: True)
 
     unlink_calls = []
 
@@ -148,6 +149,7 @@ def test_main_startup(monkeypatch, tmp_path):
 
     monkeypatch.setattr("sys.argv", ["proxy.py", "--pidfile", str(pidfile)])
     monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
+    monkeypatch.setattr("dsv4_cc_proxy.__main__._check_port_available", lambda h, p: True)
 
     # 补丁 os.unlink 防止 finally 子句删除 PID 文件
     unlink_calls = []
@@ -176,6 +178,7 @@ def test_main_startup_with_dump(monkeypatch, tmp_path):
     monkeypatch.setattr("sys.argv", ["proxy.py", "--pidfile", str(pidfile)])
     monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
     monkeypatch.setattr("dsv4_cc_proxy.__main__.DUMP_DIR", "/tmp/dump")
+    monkeypatch.setattr("dsv4_cc_proxy.__main__._check_port_available", lambda h, p: True)
     monkeypatch.setattr("os.unlink", lambda p: None)
 
     from dsv4_cc_proxy.__main__ import main

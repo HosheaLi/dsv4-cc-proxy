@@ -132,7 +132,9 @@ Write-Host '  "ANTHROPIC_BASE_URL": "http://localhost:16889"' -ForegroundColor Y
 Write-Host ""
 
 if ($PassThru) {
-    $proc = Start-Process -FilePath $VenvPython -ArgumentList "`"$ProxyScript`"" -NoNewWindow -PassThru
+    $logFile = Join-Path $env:TEMP "dsv4-cc-proxy-startup.log"
+    $proc = Start-Process -FilePath $VenvPython -ArgumentList "`"$ProxyScript`"" `
+        -NoNewWindow -PassThru -RedirectStandardError $logFile
     return $proc
 } else {
     & $VenvPython $ProxyScript
