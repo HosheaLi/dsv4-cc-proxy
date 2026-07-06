@@ -101,6 +101,7 @@ def _get_client() -> httpx.AsyncClient:
         _shared_client = httpx.AsyncClient(
             timeout=httpx.Timeout(600.0, connect=10.0),
             limits=httpx.Limits(max_keepalive_connections=8, max_connections=20),
+            trust_env=False,  # 禁用系统代理 (Windows 上 httpx 默认使用 IE 代理设置)
         )
     return _shared_client
 
@@ -370,7 +371,32 @@ def _normalize_thinking(data: dict) -> bool:
 
     thinking_type = thinking_cfg.get("type", "")
     if thinking_type in ("enabled", "disabled"):
-        return False
+        # enabled/disabled 模式下仍需清理 DeepSeek 不识别的字段
+        cleaned = False
+        for key in ("reasoning_effort", "output_config"):
+            if data.pop(key, None) is not None:
+                logger.info("[THINKING] removed %s (type=%s)", key, thinking_type)
+                cleaned = True
+        if thinking_type == "disabled":
+            # disabled 模式还需剥离历史中的 thinking 块
+            stripped = 0
+            for msg in data.get("messages", []):
+                if msg.get("role") != "assistant":
+                    continue
+                content = msg.get("content", [])
+                if isinstance(content, str):
+                    continue
+                new_content = [
+                    b for b in content
+                    if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+                ]
+                if len(new_content) != len(content):
+                    stripped += len(content) - len(new_content)
+                    msg["content"] = new_content
+            if stripped > 0:
+                logger.info("[THINKING] stripped %d thinking blocks (type=disabled)", stripped)
+                cleaned = True
+        return cleaned
 
     # Not(2026-06-19): adaptive/auto → disabled。
     # 原因：DeepSeek 在 thinking=enabled 模式下容易陷入无限思考循环，

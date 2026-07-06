@@ -152,8 +152,10 @@ def test_stop_already_dead(monkeypatch, tmp_path):
 
     _stop(str(pidfile))
 
-    assert len(kill_calls) == 1
+    # 新流程: SIGTERM → SIG_0 (探活: 进程已退出) → 清理
+    assert len(kill_calls) == 2
     assert kill_calls[0] == (99999, signal.SIGTERM)
+    assert kill_calls[1] == (99999, 0)  # _is_process_alive → 已退出
     assert len(unlink_called) == 1
 
 
@@ -175,7 +177,7 @@ def test_stop_graceful_timeout(monkeypatch, tmp_path):
 
     _stop(str(pidfile))
 
-    # 1 x SIGTERM + 10 x SIG_0 + 1 x SIGKILL = 12 os.kill calls
+    # 新流程: SIGTERM → SIG_0×10 (探活: 仍存活) → SIGKILL
     assert len(kill_calls) == 12
     assert kill_calls[0] == (99999, signal.SIGTERM)
     assert kill_calls[-1] == (99999, signal.SIGKILL)

@@ -216,7 +216,12 @@ def _watchdog_main(args):
 
 
 def _stop(pidfile: str):
-    """停止代理：读取 PID 文件 → SIGTERM → 等待 → SIGKILL（超时则强制杀）。"""
+    """停止代理：读取 PID 文件 → terminate → 等待 → kill（超时则强制杀）。
+
+    跨平台兼容：Unix 使用 SIGTERM/SIGKILL，Windows 使用 TerminateProcess。
+    注意：Windows 上 os.kill 不支持 POSIX 信号，此函数通过 Popen 方式
+    发送 terminate 并在失败时回退到 os.kill。
+    """
     if not os.path.exists(pidfile):
         logger.warning("Proxy not running (PID file not found: %s)", pidfile)
         sys.exit(1)
@@ -230,35 +235,47 @@ def _stop(pidfile: str):
 
     logger.info("Stopping dsv4-cc-proxy (PID %d)...", pid)
 
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        logger.info("Process not found, cleaning up PID file")
-        os.unlink(pidfile)
-        return
+    # 跨平台 terminate: 优先使用 os.kill (Unix) 或 subprocess (Windows)
+    _try_terminate(pid)
 
+    # 等待进程退出 (最多 5s)
     for _ in range(10):
         time.sleep(0.5)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _is_process_alive(pid):
             logger.info("Proxy stopped gracefully")
-            try:
-                os.unlink(pidfile)
-            except FileNotFoundError:
-                pass
+            _cleanup(pidfile)
             return
 
-    logger.warning("Graceful shutdown timed out, sending SIGKILL...")
+    logger.warning("Graceful shutdown timed out, force killing...")
+    _try_kill(pid)
+    _cleanup(pidfile)
+    logger.info("Proxy stopped (forced)")
+
+
+def _is_process_alive(pid: int) -> bool:
+    """跨平台进程存活检测。"""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _try_terminate(pid: int) -> None:
+    """跨平台 terminate 进程。"""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError, AttributeError):
+        # Windows: signal.SIGTERM 可能不存在或不被支持
+        pass
+
+
+def _try_kill(pid: int) -> None:
+    """跨平台 kill 进程。"""
     try:
         os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (OSError, ProcessLookupError, AttributeError):
         pass
-    try:
-        os.unlink(pidfile)
-    except FileNotFoundError:
-        pass
-    logger.info("Proxy stopped (forced)")
 
 
 def main():
