@@ -31,16 +31,18 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 | 🍎 **macOS 安装脚本** | `scripts/install_macos.sh` 自动检测 Python，处理 Homebrew 外部管理环境，自动回退到 venv |
 | 🚨 **端口冲突检测** | 启动前主动检测端口占用——避免静默失败和看门狗重启循环 |
 | 🔍 **启动失败可见性** | 全平台：致命错误输出到 stderr。Windows：同时写入事件日志 |
+| ✨ **提示词字符标准化** | Unicode 排版引号自动转 ASCII 单引号，日期格式统一（`2026/06/30` → `2026-06-30`），避免 DeepSeek 解析异常 |
 
 ## 为什么需要这个代理
 
-DeepSeek V4 实现了 Anthropic API 格式，但有 3 个关键的不兼容问题会导致 Claude Code 无法正常运行。这个代理在中间透明地修复它们。
+DeepSeek V4 实现了 Anthropic API 格式，但有 4 个关键的不兼容问题会导致 Claude Code 无法正常运行。这个代理在中间透明地修复它们。
 
 | # | 问题 | 症状 | 修复 |
 |---|------|------|------|
 | 1 | tool_use assistant 消息缺少 thinking 块 | `reasoning_content` 400 错误 | 在每个 tool_use 前注入空 thinking 块 |
 | 2 | DeepSeek 无条件返回 thinking/signature_delta SSE 事件 | Claude Code 报 `Tool result missing due to internal error` | 从 SSE 响应流中剥离 thinking 事件 |
 | 3 | `thinking.type=adaptive`（Claude Code 默认值）+ `reasoning_effort` 不被 DeepSeek 支持 | 流式截断 / 400 错误 | 标准化为 `disabled` + 移除 reasoning_effort |
+| 4 | 系统提示词中的 Unicode 排版引号（如 `'` `'` `'`）和日期斜杠格式（`2026/06/30`）导致 DeepSeek 解析异常 | 工具调用参数截断、JSON 格式错乱 | 递归标准化为 ASCII 单引号 + `YYYY-MM-DD` 日期格式 |
 
 非 DeepSeek 模型请求和非 `/messages` 端点的请求零开销透传。
 

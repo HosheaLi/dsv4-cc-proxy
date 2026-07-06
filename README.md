@@ -33,16 +33,18 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 | 🍎 **macOS Installer** | `scripts/install_macos.sh` auto-detects Python, handles Homebrew externally-managed environments, falls back to venv |
 | 🚨 **Port Conflict Detection** | Proactive port check before startup — prevents silent failure and watchdog restart loops |
 | 🔍 **Startup Failure Visibility** | All platforms: fatal errors printed to stderr. Windows: also written to Event Log |
+| ✨ **Prompt Character Normalization** | Unicode typographic quotes auto-converted to ASCII, date format unified (`2026/06/30` → `2026-06-30`) to prevent DeepSeek parsing errors |
 
 ## Why dsv4-cc-proxy
 
-DeepSeek V4 implements the Anthropic API format, but has 3 critical incompatibilities that break Claude Code. This proxy fixes them transparently.
+DeepSeek V4 implements the Anthropic API format, but has 4 critical incompatibilities that break Claude Code. This proxy fixes them transparently.
 
 | # | Problem | Symptom | Fix |
 |---|---------|---------|-----|
 | 1 | `tool_use` assistant messages missing a `thinking` block | `reasoning_content` 400 error | Inject empty thinking block before each tool_use |
 | 2 | DeepSeek unconditionally emits `thinking`/`signature_delta` SSE events even when thinking is disabled | `Tool result missing due to internal error` in Claude Code | Strip thinking events from the SSE response stream |
 | 3 | `thinking.type=adaptive` (Claude Code default) + `reasoning_effort` not supported by DeepSeek | Stream truncation / 400 errors | Normalize to `disabled` + strip reasoning_effort |
+| 4 | Unicode typographic quotes (`'` `'` `'`) and date slash format (`2026/06/30`) in system prompts cause DeepSeek to misinterpret instructions | Truncated tool call arguments, malformed JSON output | Recursively normalize to ASCII single quotes + `YYYY-MM-DD` date format |
 
 Non-DeepSeek requests and non-`/messages` endpoints pass through with zero overhead.
 
