@@ -108,6 +108,56 @@ async def health(request: Request):
     })
 
 
+# ---- 修复 0: Unicode 引号标准化 ----
+
+import re
+
+# 目标字符映射: 将排版引号统一转换为 ASCII 单引号 (U+0027)
+_QUOTE_REPLACEMENTS = str.maketrans({
+    '’': "'",   # 』 RIGHT SINGLE QUOTATION MARK
+    'ʼ': "'",   # ʼ MODIFIER LETTER APOSTROPHE
+    'ʹ': "'",   # ʹ MODIFIER LETTER PRIME
+})
+
+# 匹配 "Today's date is YYYY/MM/DD" 或 "Today's date is YYYY-MM-DD" 中的日期，
+# 将 YYYY/MM/DD 中的 / 统一替换为 -
+_DATE_PATTERN = re.compile(
+    r"((?:Today'?s date is|Current date|今天的日期是)\s*[：:]?\s*)(\d{4})/(\d{2})/(\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _normalize_text(s: str) -> str:
+    """对单个字符串应用所有标准化规则。
+
+    1. 排版引号 → ASCII 单引号
+    2. 日期中的 / → - (如 2026/06/30 → 2026-06-30)
+    """
+    s = s.translate(_QUOTE_REPLACEMENTS)
+    s = _DATE_PATTERN.sub(r'\1\2-\3-\4', s)
+    return s
+
+
+def _normalize_quotes(obj: Any) -> Any:
+    """递归替换数据中的排版引号和日期格式。
+
+    对 str 应用 _normalize_text，对 list/dict 递归遍历。
+    不可变类型（int/float/bool/None）直接返回。
+    不会修改原始对象（对可变类型返回新对象）。
+
+    替换规则:
+      - U+2019/U+02BC/U+02B9 → U+0027 (ASCII 单引号)
+      - "Today's date is YYYY/MM/DD" → "Today's date is YYYY-MM-DD"
+    """
+    if isinstance(obj, str):
+        return _normalize_text(obj)
+    if isinstance(obj, dict):
+        return {k: _normalize_quotes(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_normalize_quotes(item) for item in obj]
+    return obj
+
+
 # ---- 修复 1: 请求端 thinking 注入 ----
 
 
@@ -174,8 +224,11 @@ def _normalize_thinking(data: dict) -> bool:
     if thinking_type in ("enabled", "disabled"):
         return False
 
-    # adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）
-    target = "enabled"
+    # Not(2026-06-19): adaptive/auto → disabled。
+    # 原因：DeepSeek 在 thinking=enabled 模式下容易陷入无限思考循环，
+    # 消耗全部 max_tokens 而无法输出实际内容（尤其是结构化 JSON 输出和
+    # 工具调用任务）。禁用 thinking 后模型直接输出，稳定性和可用性更好。
+    target = "disabled"
     data["thinking"] = {"type": target}
 
     for key in ("reasoning_effort", "output_config"):
@@ -209,6 +262,118 @@ def _normalize_thinking(data: dict) -> bool:
         thinking_type, target, stripped,
     )
     return True
+
+
+def _translate_anthropic_structured_output(data: dict) -> bool:
+    """将 Anthropic 结构化输出字段翻译为 DeepSeek 兼容格式。
+
+    Anthropic Messages API 的结构化输出机制不被 DeepSeek 支持:
+      - output_config.format (GA, 2025-11) → DeepSeek 不识此字段
+      - output_format (beta) → DeepSeek 不识此字段
+      - tool_choice: {type: "tool", name: "X"} → DeepSeek 返回错误
+
+    翻译策略:
+      1. 提取 JSON Schema (来自 output_config/output_format 或 tool input_schema)
+      2. 注入 schema 到 system prompt
+      3. 移除不支持的字段
+      4. 将 named tool_choice 降级为 auto
+
+    仅在模型为 deepseek-* 时生效。对原生 Anthropic 模型透明。
+    """
+    model = data.get("model", "")
+    if not isinstance(model, str) or not model.startswith("deepseek-"):
+        return False
+
+    modified = False
+    schema_json: str | None = None
+
+    # 1. 提取 output_config.format / output_format 中的 JSON Schema
+    for key in ("output_config", "output_format"):
+        cfg = data.pop(key, None)
+        if isinstance(cfg, dict):
+            fmt = cfg.get("format", {})
+            if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
+                schema = fmt.get("schema", {})
+                name = fmt.get("name", "response")
+                if schema:
+                    schema_json = json.dumps(schema, ensure_ascii=False, indent=2)
+                logger.info(
+                    "[ANTHROPIC] removed %s (name=%s) → schema injected to system",
+                    key, name,
+                )
+                modified = True
+
+    # 2. 处理 named tool_choice → auto (DeepSeek 不支持)
+    tool_choice = data.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
+        tool_name = tool_choice.get("name", "?")
+        data["tool_choice"] = {"type": "auto"}
+        logger.info(
+            "[ANTHROPIC] converted named tool_choice (%s) → auto",
+            tool_name,
+        )
+        # 若步骤 1 未提取到 schema，从工具定义中提取
+        if schema_json is None:
+            for t in data.get("tools", []):
+                if isinstance(t, dict) and t.get("name") == tool_name:
+                    input_schema = t.get("input_schema", {})
+                    if input_schema:
+                        schema_json = json.dumps(
+                            input_schema, ensure_ascii=False, indent=2,
+                        )
+                    break
+        modified = True
+
+    # 3. 注入 schema 到 system prompt
+    if schema_json:
+        schema_prompt = (
+            "\n\n你 MUST 用符合以下 JSON Schema 的单个 JSON 对象回复:\n"
+            f"```json\n{schema_json}\n```\n"
+            "不要用 markdown 代码块包裹 JSON。"
+            "只输出 JSON 对象，不要输出其他内容。"
+        )
+
+        system = data.get("system")
+        if isinstance(system, str):
+            data["system"] = system + schema_prompt
+        elif isinstance(system, list):
+            # Anthropic content blocks 格式
+            system.append({"type": "text", "text": schema_prompt})
+        else:
+            data["system"] = [{"type": "text", "text": schema_prompt}]
+
+        logger.info("[ANTHROPIC] schema instructions injected into system prompt")
+        modified = True
+
+    return modified
+
+
+def _should_disable_thinking_for_structured_output(data: dict) -> bool:
+    """若响应需要结构化 JSON 输出且 thinking 开启，则返回 True 以强制关闭。
+
+    原因: DeepSeek 开启 thinking 时会先输出大量思考 token，当同时要求
+    response_format: json_object 时，思考可能消耗全部 max_tokens 导致
+    实际文本输出为空。此行为与 Anthropic 原版 API 一致（Anthropic 也禁止
+    thinking + forced tool use 同时使用）。
+    """
+    model = data.get("model", "")
+    if not isinstance(model, str) or not model.startswith("deepseek-"):
+        return False
+
+    thinking = data.get("thinking", {})
+    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+        return False
+
+    # 检查是否有结构化输出要求
+    has_response_format = "response_format" in data
+    has_output_config = "output_config" in data
+    has_output_format = "output_format" in data
+
+    if has_response_format or has_output_config or has_output_format:
+        logger.info("[ANTHROPIC] disabling thinking for structured output request")
+        return True
+
+    return False
 
 
 # ---- 响应端: thinking 透传 ----
@@ -279,27 +444,45 @@ async def proxy(request: Request):
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in ("host",)}
 
-    is_messages = (method == "POST" and path.rstrip("/").endswith("/messages"))
+    # 匹配所有 /messages 子路径（含 count_tokens 等），但仅对主端点
+    # 做 thinking 标准化和注入 — 避免破坏子端点的请求体。
+    is_messages_api = (method == "POST" and "/messages" in path.split("?")[0])
+    is_chat_endpoint = (method == "POST" and path.rstrip("/").endswith("/messages"))
 
-    body = await request.body() if is_messages else b""
+    body = await request.body() if is_messages_api else b""
     modified_body = body
 
-    if is_messages:
+    if is_messages_api:
         try:
             data = json.loads(body)
-            logger.info("[REQ] %s", json.dumps(_summarize_request(data), ensure_ascii=False))
+            # Unicode 引号标准化: 排版引号 → ASCII 单引号
+            data = _normalize_quotes(data)
+            # 仅主 chat 端点需要日志摘要
+            if is_chat_endpoint:
+                logger.info("[REQ] %s", json.dumps(_summarize_request(data), ensure_ascii=False))
             _dump_json("last_request.json", data)
 
-            thinking_normalized = _normalize_thinking(data)
+            if is_chat_endpoint:
+                thinking_normalized = _normalize_thinking(data)
 
-            if _inject_thinking_blocks(data):
-                logger.info("[INJECT] added empty thinking block")
-                thinking_normalized = True
+                if _inject_thinking_blocks(data):
+                    logger.info("[INJECT] added empty thinking block")
+                    thinking_normalized = True
 
-            if thinking_normalized:
-                modified_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-                headers["content-length"] = str(len(modified_body))
-                _dump_json("last_request_modified.json", data)
+                # 翻译 Anthropic 结构化输出 → DeepSeek 兼容 (CODX-17)
+                if _translate_anthropic_structured_output(data):
+                    thinking_normalized = True
+
+                # 若设置了 response_format 则禁用 thinking，避免模型
+                # 陷入无限思考循环耗尽 max_tokens 而无法输出 JSON
+                if _should_disable_thinking_for_structured_output(data):
+                    data["thinking"] = {"type": "disabled"}
+                    thinking_normalized = True
+
+                if thinking_normalized:
+                    modified_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                    headers["content-length"] = str(len(modified_body))
+                    _dump_json("last_request_modified.json", data)
 
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
@@ -412,6 +595,8 @@ def _translate_usage(usage: dict[str, Any] | None) -> dict[str, int]:
 
 def _translate_chat_to_responses(chat_response: dict, model: str) -> dict:
     """将 Chat Completions JSON -> Responses API JSON (非流式)。"""
+    # Unicode 引号标准化: 排版引号 → ASCII 单引号
+    chat_response = _normalize_quotes(chat_response)
     choices = chat_response.get("choices") or [{}]
     choice = choices[0] if choices else {}
     message = choice.get("message", {})
@@ -558,16 +743,33 @@ async def responses_handler(request: Request):
     except json.JSONDecodeError:
         return _build_error(400, "invalid_request_error", "Request body is not valid JSON")
 
+    # Unicode 引号标准化: 排版引号 → ASCII 单引号
+    request_body = _normalize_quotes(request_body)
+
     headers = {
         "content-type": "application/json",
         "authorization": request.headers.get("authorization", ""),
     }
 
     try:
+        # 临时: dump 原始和翻译后的 Codex 请求
+        import os as _os, tempfile as _tempfile
+        _orig_path = _os.path.join(_tempfile.gettempdir(), "last_codex_original_request.json")
+        with open(_orig_path, "w") as _f:
+            json.dump(request_body, _f, ensure_ascii=False, indent=2, default=str)
+        logger.warning("[CODEX] dumped original request to %s", _orig_path)
+
         chat_request = translate_request(request_body)
     except Exception:
         logger.exception("[CODEX] translate_request failed")
         return _build_error(400, "invalid_request_error", "Failed to translate request")
+
+    # 临时: dump 翻译后的 Codex 请求
+    if DUMP_DIR:
+        _dump_path = os.path.join(DUMP_DIR, "last_codex_chat_request.json")
+        with open(_dump_path, "w") as _f:
+            json.dump(chat_request, _f, ensure_ascii=False, indent=2, default=str)
+        logger.warning("[CODEX] dumped chat request to %s", _dump_path)
 
     upstream_url = f"{CODEX_UPSTREAM}/chat/completions"
 

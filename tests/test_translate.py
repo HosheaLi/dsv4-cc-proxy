@@ -67,6 +67,49 @@ def test_message_content_array():
     assert result["messages"][0]["content"] == "Part1\nPart2"
 
 
+def test_message_content_array_output_text():
+    """验证 content 数组（output_text 类型）拼接为字符串。
+
+    Codex 在历史 assistant 消息中使用 output_text 类型
+    （遵循 OpenAI Responses API 规范），而非 input_text。
+    """
+    body = {
+        "model": "test-model",
+        "input": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "I did this"},
+                    {"type": "output_text", "text": "Then that"},
+                ],
+            }
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert len(result["messages"]) == 1
+    assert result["messages"][0]["role"] == "assistant"
+    assert result["messages"][0]["content"] == "I did this\nThen that"
+
+
+def test_assistant_mixed_content_types():
+    """验证 assistant 消息中混合 input_text + output_text 都正确提取。"""
+    body = {
+        "model": "test-model",
+        "input": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Response text"},
+                ],
+            }
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert result["messages"][0]["content"] == "Response text"
+
+
 def test_message_content_none():
     """验证 content 为 None 时透传。"""
     body = {
@@ -516,9 +559,10 @@ def test_reasoning_anomalous_sequence(monkeypatch):
 
 
 def test_reasoning_effort_mapping(monkeypatch):
-    """验证 reasoning.effort -> thinking 参数映射 (CODX-12, D-10, D-11)。
+    """验证 reasoning.effort -> thinking 参数映射 (CODX-12)。
 
-    - low/medium/high 都映射为 thinking: {"type": "enabled"}
+    - low/medium/high 都映射为 thinking: {"type": "disabled"}
+      （避免 DeepSeek 无限思考循环）
     - 映射后 reasoning 字段从 body 中移除
     - 无 reasoning.effort 时不添加 thinking
     """
@@ -534,7 +578,7 @@ def test_reasoning_effort_mapping(monkeypatch):
     }
     result = codex_translate.translate_request(body)
 
-    assert result["thinking"] == {"type": "enabled"}
+    assert result["thinking"] == {"type": "disabled"}
     assert "reasoning" not in result
 
     # 2. effort=medium 映射
@@ -545,7 +589,7 @@ def test_reasoning_effort_mapping(monkeypatch):
     }
     result = codex_translate.translate_request(body)
 
-    assert result["thinking"] == {"type": "enabled"}
+    assert result["thinking"] == {"type": "disabled"}
     assert "reasoning" not in result
 
     # 3. effort=low 映射
@@ -556,27 +600,25 @@ def test_reasoning_effort_mapping(monkeypatch):
     }
     result = codex_translate.translate_request(body)
 
-    assert result["thinking"] == {"type": "enabled"}
+    assert result["thinking"] == {"type": "disabled"}
     assert "reasoning" not in result
 
-    # 4. 无 reasoning.effort — 不添加 thinking
+    # 4. 无 reasoning — deepseek 模型仍强制 disabled
     body = {
         "model": "gpt-5.3-codex",
         "input": [{"role": "user", "content": "Hello"}],
     }
     result = codex_translate.translate_request(body)
+    assert result["thinking"] == {"type": "disabled"}
 
-    assert "thinking" not in result
-
-    # 5. reasoning 为空 dict — 不添加 thinking，移除 reasoning
+    # 5. reasoning 为空 dict → deepseek 模型强制 disabled
     body = {
         "model": "gpt-5.3-codex",
         "reasoning": {},
         "input": [{"role": "user", "content": "Hello"}],
     }
     result = codex_translate.translate_request(body)
-
-    assert "thinking" not in result
+    assert result["thinking"] == {"type": "disabled"}
     assert "reasoning" not in result
 
 
@@ -606,6 +648,64 @@ def test_unknown_type_skipped(monkeypatch):
     assert result["messages"][1]["content"] == "World"
 
 
+def test_empty_assistant_message_sanitized(monkeypatch):
+    """验证空 assistant 消息（无 content、无 tool_calls）被自动修复为 content=""。
+
+    DeepSeek 拒绝 content 和 tool_calls 都为空的 assistant 消息，
+    报错 "Invalid assistant message: content or tool_calls must be set"。
+    """
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": None},
+            {"role": "user", "content": "Continue"},
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert len(result["messages"]) == 3
+    asst_msgs = [m for m in result["messages"] if m.get("role") == "assistant"]
+    assert len(asst_msgs) == 1
+    assert asst_msgs[0]["content"] == ""
+    assert "tool_calls" not in asst_msgs[0]
+
+
+def test_assistant_with_tool_calls_unchanged(monkeypatch):
+    """验证有 tool_calls 但 content=None 的合成 assistant 不被修改。
+
+    这是正常场景：function_call 前没有 assistant 消息时创建的合成消息。
+    DeepSeek 接受 content=None + tool_calls 的组合。
+    """
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"role": "user", "content": "Read file"},
+            {
+                "type": "function_call",
+                "id": "call_1",
+                "name": "Bash",
+                "arguments": '{"cmd": "ls"}',
+                "status": "completed",
+            },
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    asst_msgs = [m for m in result["messages"] if m.get("role") == "assistant"]
+    assert len(asst_msgs) == 1
+    assert asst_msgs[0]["content"] is None
+    assert len(asst_msgs[0]["tool_calls"]) == 1
+
+
 def test_translate_request_immutable(monkeypatch):
     """验证 translate_request 不修改输入 dict。"""
     monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
@@ -629,6 +729,87 @@ def test_translate_request_immutable(monkeypatch):
     body_copy = copy.deepcopy(body)
     codex_translate.translate_request(body)
     assert body == body_copy
+
+
+def test_tool_reorder_user_between_tc_and_output(monkeypatch):
+    """验证 user 消息在 function_call 和 function_call_output 之间时，
+    tool 消息被重排到 assistant 之后 (CODX-21)。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"role": "user", "content": "Task A"},
+            {"role": "assistant", "content": "Let me execute"},
+            {
+                "type": "function_call",
+                "id": "call_1",
+                "name": "Bash",
+                "arguments": '{"cmd":"echo done"}',
+                "status": "completed",
+            },
+            # ⚠ user 消息插入在 function_call 和 function_call_output 之间
+            {"role": "user", "content": "Fix the file"},
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "Task completed successfully",
+            },
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    msgs = result["messages"]
+    # 找到 assistant 和 tool 消息
+    asst_idx = next(i for i, m in enumerate(msgs) if m.get("role") == "assistant")
+    tool_idx = next(i for i, m in enumerate(msgs) if m.get("role") == "tool")
+
+    # tool 消息应紧接在 assistant 之后（index 差 1）
+    assert tool_idx == asst_idx + 1, (
+        f"tool message should immediately follow assistant, "
+        f"but asst@{asst_idx}, tool@{tool_idx}"
+    )
+    # user 消息应在 tool 之后
+    user_idx = next(i for i, m in enumerate(msgs) if m.get("content") == "Fix the file")
+    assert user_idx > tool_idx
+
+
+def test_tool_reorder_multiple_users(monkeypatch):
+    """验证多个 user 消息穿插时不破坏重排。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {"role": "assistant", "content": "Running"},
+            {
+                "type": "function_call",
+                "id": "call_a",
+                "name": "Bash",
+                "arguments": "{}",
+            },
+            {"role": "user", "content": "Msg 1"},
+            {"role": "user", "content": "Msg 2"},
+            {
+                "type": "function_call_output",
+                "call_id": "call_a",
+                "output": "result",
+            },
+        ],
+    }
+    result = codex_translate.translate_request(body)
+
+    msgs = result["messages"]
+    asst_idx = next(i for i, m in enumerate(msgs) if m.get("role") == "assistant")
+    tool_idx = next(i for i, m in enumerate(msgs) if m.get("role") == "tool")
+
+    # tool 紧接 assistant
+    assert tool_idx == asst_idx + 1
+    assert msgs[tool_idx]["tool_call_id"] == "call_a"
 
 
 # =============================================================================
@@ -669,3 +850,134 @@ def test_max_output_tokens_renamed(monkeypatch):
 
     assert result["max_tokens"] == 8192
     assert "max_output_tokens" not in result
+
+
+# =============================================================================
+# 组 3: text.format → response_format 翻译 (CODX-16)
+# =============================================================================
+
+
+def test_text_format_json_object(monkeypatch):
+    """验证 text.format json_object → response_format: {type: json_object}。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "test",
+        "input": [{"role": "user", "content": "Say hi"}],
+        "text": {"format": {"type": "json_object"}},
+    }
+    result = codex_translate.translate_request(body)
+
+    assert result["response_format"] == {"type": "json_object"}
+    assert "text" not in result  # 不应泄漏到 DeepSeek
+
+
+def test_text_format_json_schema(monkeypatch):
+    """验证 text.format json_schema → response_format + schema 注入 system prompt。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    schema = {
+        "type": "object",
+        "required": ["verdict", "summary"],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["approve", "needs-attention"]},
+            "summary": {"type": "string"},
+        },
+    }
+    body = {
+        "model": "test",
+        "input": [{"role": "user", "content": "Review this code"}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "review_output",
+                "schema": schema,
+                "strict": True,
+            }
+        },
+    }
+    result = codex_translate.translate_request(body)
+
+    # response_format 应设为 json_object (DeepSeek 降级)
+    assert result["response_format"] == {"type": "json_object"}
+    # text 字段不应泄漏
+    assert "text" not in result
+    # 系统消息应包含 schema 提示
+    system_msg = result["messages"][0]
+    assert system_msg["role"] == "system"
+    assert "JSON Schema" in system_msg["content"]
+    assert "verdict" in system_msg["content"]
+    assert "summary" in system_msg["content"]
+    # strict 提示应包含
+    assert "严格遵守" in system_msg["content"]
+
+
+def test_text_format_json_schema_with_existing_instructions(monkeypatch):
+    """验证 json_schema 提示追加到已有 instructions 后面。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "test",
+        "instructions": "Be a helpful reviewer.",
+        "input": [{"role": "user", "content": "Review"}],
+        "text": {"format": {"type": "json_schema", "name": "r", "schema": {"type": "object"}}},
+    }
+    result = codex_translate.translate_request(body)
+
+    system_msg = result["messages"][0]
+    assert system_msg["role"] == "system"
+    assert "Be a helpful reviewer." in system_msg["content"]
+    assert "JSON Schema" in system_msg["content"]
+
+
+def test_text_format_none_when_missing(monkeypatch):
+    """验证无 text 字段时不设置 response_format。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "test",
+        "input": [{"role": "user", "content": "Hello"}],
+    }
+    result = codex_translate.translate_request(body)
+
+    assert "response_format" not in result
+
+
+def test_text_format_none_when_not_dict(monkeypatch):
+    """验证 text 为非 dict 类型时不设置 response_format。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "test",
+        "input": [{"role": "user", "content": "Hello"}],
+        "text": "not a config object",
+    }
+    result = codex_translate.translate_request(body)
+
+    assert "response_format" not in result
+
+
+def test_text_format_unknown_type_falls_back(monkeypatch):
+    """验证未知 format type 时保守降级为 json_object。"""
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("CODEX_MODEL_MAP", "{}")
+    reload(codex_translate)
+
+    body = {
+        "model": "test",
+        "input": [{"role": "user", "content": "Hello"}],
+        "text": {"format": {"type": "unknown_future_type"}},
+    }
+    result = codex_translate.translate_request(body)
+
+    assert result["response_format"] == {"type": "json_object"}

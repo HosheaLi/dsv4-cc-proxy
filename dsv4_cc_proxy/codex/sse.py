@@ -26,6 +26,33 @@ from collections.abc import AsyncGenerator, AsyncIterable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
+# Unicode 引号替换表: 排版引号 → ASCII 单引号 (U+0027)
+import re
+
+_QUOTE_REPLACEMENTS = str.maketrans({
+    '’': "'",   # 』 RIGHT SINGLE QUOTATION MARK
+    'ʼ': "'",   # ʼ MODIFIER LETTER APOSTROPHE
+    'ʹ': "'",   # ʹ MODIFIER LETTER PRIME
+})
+
+# 匹配日期中的 / → 统一替换为 -
+_DATE_PATTERN = re.compile(
+    r"((?:Today'?s date is|Current date|今天的日期是)\s*[：:]?\s*)(\d{4})/(\d{2})/(\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _normalize_text(s: str) -> str:
+    """替换字符串中的排版引号和日期格式。
+
+    1. U+2019/U+02BC/U+02B9 → ASCII 单引号
+    2. "Today's date is YYYY/MM/DD" → "Today's date is YYYY-MM-DD"
+    """
+    s = s.translate(_QUOTE_REPLACEMENTS)
+    s = _DATE_PATTERN.sub(r'\1\2-\3-\4', s)
+    return s
+
+
 logger = logging.getLogger("deepseek-proxy")
 
 # SSE keepalive 间隔 (秒) — Codex CLI 0.130.0+ 在 ~5s 无活动后断开
@@ -371,20 +398,29 @@ def _build_function_call_arguments_done(
 
 
 def _build_output_item_done(
-    output_index: int, item_type: str, item_id: str, sequence: int, **fields,
+    output_index: int,
+    item_type: str,
+    item_id: str,
+    sequence: int,
+    completed_outputs: list[dict] | None = None,
+    **fields,
 ) -> str:
     """构建 response.output_item.done SSE 事件。
 
     根据 item_type 自动设置不同的 item 结构:
     - reasoning: {id, type, status}
-    - message: {id, type, status, content} 含 accumulated_text
+    - message: {id, type, status, content} 含 accumulated_text, role: "assistant"
     - function_call: {id, type, name, call_id, arguments, status}
+
+    CODX-20: 当 completed_outputs 非 None 时，自动将构建的 item dict
+    追加到列表中，供 response.completed 的 output 数组使用。
 
     Args:
         output_index: 输出项序号。
         item_type: 项类型 ("reasoning" | "message" | "function_call")。
         item_id: 项标识符。
         sequence: 全局递增序列号。
+        completed_outputs: 可选的可变列表，用于收集已完成的 output item。
         **fields: 额外字段 (accumulated_text, name, call_id, accumulated_arguments)。
 
     Returns:
@@ -396,8 +432,9 @@ def _build_output_item_done(
         "status": "completed",
     }
     if item_type == "reasoning":
-        pass
+        item["summary"] = []
     elif item_type == "message":
+        item["role"] = "assistant"
         item["content"] = [
             {"type": "output_text", "text": fields.get("accumulated_text", "")},
         ]
@@ -405,6 +442,9 @@ def _build_output_item_done(
         item["name"] = fields.get("name", "unknown")
         item["call_id"] = fields.get("call_id", f"call_{output_index}")
         item["arguments"] = fields.get("accumulated_arguments", "")
+
+    if completed_outputs is not None:
+        completed_outputs.append(item)
 
     data = {
         "type": "response.output_item.done",
@@ -416,14 +456,23 @@ def _build_output_item_done(
 
 
 def _build_response_completed(
-    response_id: str, usage: dict | None, sequence: int,
+    response_id: str,
+    usage: dict | None,
+    sequence: int,
+    output_items: list[dict] | None = None,
 ) -> str:
     """构建 response.completed SSE 事件。
+
+    CODX-20: 填充 output 数组为所有已完成的输出项。
+    Codex CLI 依赖 response.completed 的 output 数组提取 "last agent message"。
+    缺失此数组会导致 Codex 报告 "no last agent message"，即使流中已正确发送
+    了所有 output_item.done 事件。
 
     Args:
         response_id: 响应唯一标识符。
         usage: token 用量 dict，None 时使用空计数。
         sequence: 全局递增序列号。
+        output_items: 已完成的输出项列表。None 时使用空列表。
 
     Returns:
         SSE 事件字符串。
@@ -448,7 +497,7 @@ def _build_response_completed(
             "created_at": now,
             "completed_at": now,
             "status": "completed",
-            "output": [],
+            "output": output_items if output_items is not None else [],
             "usage": usage_dict,
         },
     }
@@ -467,7 +516,9 @@ def _next_seq(counter: list[int]) -> int:
 
 
 def _close_active_tool_calls(
-    state: _ToolCallState, seq: list[int],
+    state: _ToolCallState,
+    seq: list[int],
+    completed_outputs: list[dict] | None = None,
 ) -> list[str]:
     """关闭所有活跃工具调用，返回 SSE 事件行列表。
 
@@ -478,6 +529,7 @@ def _close_active_tool_calls(
     Args:
         state: 工具调用状态 dataclass，封装 6 个映射。
         seq: 单元素 list，用作可变序列号计数器。
+        completed_outputs: 可选的可变列表，CODX-20 输出追踪。
 
     Returns:
         SSE 事件字符串列表。
@@ -500,6 +552,7 @@ def _close_active_tool_calls(
                 "function_call",
                 item_id,
                 _next_seq(seq),
+                completed_outputs=completed_outputs,
                 name=name,
                 call_id=call_id,
                 accumulated_arguments=accumulated,
@@ -513,6 +566,7 @@ def _close_text_item(
     text_output_index: int,
     accumulated_text: str,
     seq: list[int],
+    completed_outputs: list[dict] | None = None,
 ) -> list[str]:
     """关闭文本输出 item，返回完整的 SSE 事件序列。
 
@@ -529,6 +583,7 @@ def _close_text_item(
         text_output_index: 文本 item 的 output_index。
         accumulated_text: 完整文本内容。
         seq: 单元素 list，用作可变序列号计数器。
+        completed_outputs: 可选的可变列表，CODX-20 输出追踪。
 
     Returns:
         SSE 事件字符串列表（3 个事件）。
@@ -542,6 +597,7 @@ def _close_text_item(
         ),
         _build_output_item_done(
             text_output_index, "message", text_item_id, _next_seq(seq),
+            completed_outputs=completed_outputs,
             accumulated_text=accumulated_text,
         ),
     ]
@@ -587,6 +643,9 @@ async def translate_sse_stream(
     tc_state = _ToolCallState()             # D-07: 追踪活跃 tool_call indices
     is_first_chunk = True
     _completed = False                       # D-08: finish_reason 幂等保护
+
+    # CODX-20: 追踪已完成 output item 供 response.completed 使用
+    completed_outputs: list[dict] = []
 
     # seq 使用单元素列表实现可变引用 — 避免在多个辅助函数间传递 int 的麻烦
     seq = [0]                                # 全局递增序列号 (所有事件共享)
@@ -648,16 +707,18 @@ async def translate_sse_stream(
             # ---- reasoning_content 处理 (D-08) ----
             reasoning = delta.get("reasoning_content")
             if reasoning:
+                reasoning = _normalize_text(reasoning)
                 if current_output_type is not None and current_output_type != "reasoning":
                     # 类型转换：关闭当前 item
                     if current_output_type == "tool_call":
-                        events = _close_active_tool_calls(tc_state, seq)
+                        events = _close_active_tool_calls(tc_state, seq, completed_outputs)
                         for event in events:
                             yield event
                         tc_state.clear()
                     elif current_output_type == "text":
                         for event in _close_text_item(
                             text_item_id, text_output_index, accumulated_text, seq,
+                            completed_outputs,
                         ):
                             yield event
                         accumulated_text = ""
@@ -691,10 +752,11 @@ async def translate_sse_stream(
             # ---- content (text) 处理 (D-09) ----
             content_text = delta.get("content")
             if content_text:  # 非空字符串（跳过角色声明的空 content）
+                content_text = _normalize_text(content_text)
                 if current_output_type is not None and current_output_type != "text":
                     # 类型转换：关闭当前 item
                     if current_output_type == "tool_call":
-                        events = _close_active_tool_calls(tc_state, seq)
+                        events = _close_active_tool_calls(tc_state, seq, completed_outputs)
                         for event in events:
                             yield event
                         tc_state.clear()
@@ -702,6 +764,7 @@ async def translate_sse_stream(
                         yield _build_output_item_done(
                             reasoning_output_index, "reasoning",
                             reasoning_item_id, _next_seq(seq),
+                            completed_outputs=completed_outputs,
                         )
                         reasoning_item_id = None
                         accumulated_reasoning = ""
@@ -757,6 +820,7 @@ async def translate_sse_stream(
                             yield _build_output_item_done(
                                 reasoning_output_index, "reasoning",
                                 reasoning_item_id, _next_seq(seq),
+                                completed_outputs=completed_outputs,
                             )
                             reasoning_item_id = None
                             accumulated_reasoning = ""
@@ -787,6 +851,7 @@ async def translate_sse_stream(
 
                     # 收获 arguments 片段（含首次空字符串）
                     arg_fragment = tc.get("function", {}).get("arguments", "")
+                    arg_fragment = _normalize_text(arg_fragment)
                     tc_state.arguments[idx] += arg_fragment
 
                     yield _build_function_call_arguments_delta(
@@ -803,7 +868,7 @@ async def translate_sse_stream(
             if finish_reason:
                 # 关闭所有活跃工具调用
                 if tc_state.active_indices:
-                    events = _close_active_tool_calls(tc_state, seq)
+                    events = _close_active_tool_calls(tc_state, seq, completed_outputs)
                     for event in events:
                         yield event
                     tc_state.clear()
@@ -812,17 +877,19 @@ async def translate_sse_stream(
                 if current_output_type == "text" and text_item_id:
                     for event in _close_text_item(
                         text_item_id, text_output_index, accumulated_text, seq,
+                        completed_outputs,
                     ):
                         yield event
                 elif current_output_type == "reasoning" and reasoning_item_id:
                     yield _build_output_item_done(
                         reasoning_output_index, "reasoning",
                         reasoning_item_id, _next_seq(seq),
+                        completed_outputs=completed_outputs,
                     )
 
                 # 获取 usage
                 usage = chunk.get("usage")
-                yield _build_response_completed(response_id, usage, _next_seq(seq))
+                yield _build_response_completed(response_id, usage, _next_seq(seq), completed_outputs)
                 _completed = True
                 last_event_time = _now()
                 logger.info("[CODEX] SSE stream completed: %s", response_id)
@@ -830,7 +897,7 @@ async def translate_sse_stream(
     except Exception:
         logger.exception("[CODEX] SSE stream translation error")
         if not _completed:
-            yield _build_response_completed(response_id, None, _next_seq(seq))
+            yield _build_response_completed(response_id, None, _next_seq(seq), completed_outputs)
             logger.info(
                 "[CODEX] SSE stream gracefully closed after error: %s",
                 response_id,
