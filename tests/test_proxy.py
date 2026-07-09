@@ -12,6 +12,7 @@ from dsv4_cc_proxy.proxy import (
     _has_tool_use,
     _inject_thinking_blocks,
     _normalize_thinking,
+    _should_disable_thinking,
     _translate_anthropic_structured_output,
 )
 
@@ -113,8 +114,8 @@ def test_normalize_disabled_unchanged():
     assert data["thinking"]["type"] == "disabled"
 
 
-def test_normalize_adaptive_converts_to_disabled():
-    """adaptive/auto → disabled（避免 DeepSeek 无限思考循环）。"""
+def test_normalize_adaptive_converts_to_enabled():
+    """adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）。"""
     data = {
         "thinking": {"type": "adaptive"},
         "messages": [
@@ -125,25 +126,26 @@ def test_normalize_adaptive_converts_to_disabled():
         ]
     }
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "disabled"
-    # disabled 模式需剥离历史 thinking 块
+    assert data["thinking"]["type"] == "enabled"
+    # enabled 模式不剥离 thinking 块（保持缓存命中）
     content = data["messages"][0]["content"]
-    assert len(content) == 1
-    assert content[0]["type"] == "text"
+    assert len(content) == 2
+    assert content[0]["type"] == "thinking"
+    assert content[1]["type"] == "text"
 
 
 def test_normalize_adaptive_removes_effort():
     data = {"thinking": {"type": "adaptive"}, "reasoning_effort": "max"}
     _normalize_thinking(data)
     assert "reasoning_effort" not in data
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_normalize_adaptive_removes_output_config():
     data = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}}
     _normalize_thinking(data)
     assert "output_config" not in data
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_normalize_no_thinking_key():
@@ -154,17 +156,17 @@ def test_normalize_no_thinking_key():
 
 
 def test_normalize_thinking_no_messages_key():
-    """data 无 messages 键 -> True（thinking 被修改为 disabled）。"""
+    """data 无 messages 键 -> True（thinking 被修改为 enabled）。"""
     data = {"thinking": {"type": "adaptive"}}
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_normalize_thinking_unknown_type():
-    """未知 thinking type -> 转换为 disabled。"""
+    """未知 thinking type -> 转换为 enabled。"""
     data = {"thinking": {"type": "auto"}, "messages": [{"role": "user", "content": "hi"}]}
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "disabled"
+    assert data["thinking"]["type"] == "enabled"
 
 
 def test_inject_thinking_blocks_non_dict_thinking():
@@ -672,3 +674,174 @@ def test_consolidate_messages_not_a_list():
     modified, count = _consolidate_system_messages(data)
     assert not modified
     assert count == 0
+
+
+# =============================================================================
+# 组 6: _should_disable_thinking 保护函数
+# =============================================================================
+
+
+def test_should_disable_thinking_structured_output():
+    """结构化输出 + thinking=enabled → 返回 True 禁用 thinking。"""
+    data = {
+        "model": "deepseek-v4-pro",
+        "thinking": {"type": "enabled"},
+        "response_format": {"type": "json_object"},
+    }
+    assert _should_disable_thinking(data)
+
+
+def test_should_disable_thinking_output_config():
+    """output_config + thinking=enabled → 返回 True。"""
+    data = {
+        "model": "deepseek-v4-pro",
+        "thinking": {"type": "enabled"},
+        "output_config": {"format": {"type": "json_schema"}},
+    }
+    assert _should_disable_thinking(data)
+
+
+def test_should_disable_thinking_tool_calls():
+    """有 tools + thinking=enabled → 返回 True（避免无限思考循环）。"""
+    data = {
+        "model": "deepseek-v4-pro",
+        "thinking": {"type": "enabled"},
+        "tools": [{"name": "read_file", "input_schema": {}}],
+    }
+    assert _should_disable_thinking(data)
+
+
+def test_should_disable_thinking_no_protection_needed():
+    """无 tools、无结构化输出、thinking=enabled → 返回 False（允许思考）。"""
+    data = {
+        "model": "deepseek-v4-pro",
+        "thinking": {"type": "enabled"},
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    assert not _should_disable_thinking(data)
+
+
+def test_should_disable_thinking_disabled_mode():
+    """thinking=disabled → 返回 False（无需保护）。"""
+    data = {
+        "model": "deepseek-v4-pro",
+        "thinking": {"type": "disabled"},
+        "tools": [{"name": "read_file", "input_schema": {}}],
+    }
+    assert not _should_disable_thinking(data)
+
+
+def test_should_disable_thinking_non_deepseek():
+    """非 deepseek 模型 → 返回 False。"""
+    data = {
+        "model": "claude-sonnet-4-20250514",
+        "thinking": {"type": "enabled"},
+        "tools": [{"name": "read_file", "input_schema": {}}],
+    }
+    assert not _should_disable_thinking(data)
+
+
+# =============================================================================
+# 组 7: _normalize_thinking enabled 模式新增行为
+# =============================================================================
+
+
+def test_normalize_enabled_filters_redacted_thinking():
+    """enabled 模式：过滤 redacted_thinking，保留 thinking 和 text。"""
+    data = {
+        "thinking": {"type": "enabled"},
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "real thought"},
+                {"type": "redacted_thinking", "data": "secret"},
+                {"type": "text", "text": "visible output"},
+            ]},
+        ],
+    }
+    assert _normalize_thinking(data)
+    content = data["messages"][0]["content"]
+    assert len(content) == 2
+    types = [b["type"] for b in content]
+    assert "redacted_thinking" not in types
+    assert "thinking" in types
+    assert "text" in types
+
+
+def test_normalize_enabled_preserves_thinking_blocks():
+    """enabled 模式：不剥离 thinking 块（缓存命中关键）。
+
+    当 history 中没有 redacted_thinking 时，_normalize_thinking
+    返回 False（无修改），但 thinking 块仍然被保留。
+    """
+    data = {
+        "thinking": {"type": "enabled"},
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "I should check the file first"},
+                {"type": "tool_use", "name": "Bash", "id": "tool_1", "input": {}},
+            ]},
+        ],
+    }
+    # _normalize_thinking 可能返回 False（无修改需要），但 content 不应被改动
+    _normalize_thinking(data)
+    # thinking 块应保留（不改动 content）
+    assert len(data["messages"][0]["content"]) == 2
+
+
+def test_normalize_disabled_strips_thinking():
+    """disabled 模式：剥离所有 thinking 和 redacted_thinking 块。
+
+    确保 Issue #6 修复不被重启 — disabled 路径的剥离逻辑保持不变。
+    """
+    data = {
+        "thinking": {"type": "disabled"},
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "some thought"},
+                {"type": "redacted_thinking", "data": "hidden"},
+                {"type": "text", "text": "final answer"},
+            ]},
+        ],
+    }
+    assert _normalize_thinking(data)
+    content = data["messages"][0]["content"]
+    assert len(content) == 1
+    assert content[0]["type"] == "text"
+
+
+def test_normalize_enabled_cleans_reasoning_effort():
+    """enabled 模式：清理 reasoning_effort 且不影响缓存。
+
+    Issue #6 原本是 reasoning_effort + disabled 的冲突，
+    改为 enabled 后清理仍然正常执行（不产生 400 错误）。
+    """
+    data = {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    assert _normalize_thinking(data)
+    assert "reasoning_effort" not in data
+    assert data["thinking"]["type"] == "enabled"
+
+
+def test_adaptive_to_enabled_with_tools_protection():
+    """adaptive → enabled + tools → _should_disable_thinking 保护触发。
+
+    验证完整调用链：_normalize_thinking 先设为 enabled，
+    然后 _should_disable_thinking 检测到 tools 后重新 disabled。
+    """
+    data = {
+        "model": "deepseek-v4-pro",
+        "thinking": {"type": "adaptive"},
+        "tools": [{"name": "read_file", "input_schema": {}}],
+        "messages": [{"role": "user", "content": "read the file"}],
+    }
+    # Step 1: _normalize_thinking → enabled
+    assert _normalize_thinking(data)
+    assert data["thinking"]["type"] == "enabled"
+    # Step 2: _should_disable_thinking → tools detected → True
+    assert _should_disable_thinking(data)
+    # Step 3: 调用方设置 disabled
+    data["thinking"] = {"type": "disabled"}
+    assert data["thinking"]["type"] == "disabled"

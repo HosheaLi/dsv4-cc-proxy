@@ -353,15 +353,39 @@ def _inject_thinking_blocks(data: dict) -> bool:
 # ---- 修复 2: thinking 模式标准化 ----
 
 
+def _filter_content_blocks(content: list, exclude_types: tuple[str, ...]) -> int:
+    """从 content 列表中移除指定类型的块，返回移除的块数。
+
+    原地修改 content 列表（替换 msg["content"]），不返回新列表。
+    调用方负责检查 content 是否为 list 类型。
+
+    Args:
+        content: assistant 消息的 content 列表。
+        exclude_types: 要移除的 block type 元组。
+
+    Returns:
+        被移除的 block 数量。
+    """
+    new_content = [
+        b for b in content
+        if not (isinstance(b, dict) and b.get("type") in exclude_types)
+    ]
+    removed = len(content) - len(new_content)
+    if removed > 0:
+        content[:] = new_content
+    return removed
+
+
 def _normalize_thinking(data: dict) -> bool:
     """将非标准 thinking type 标准化为 DeepSeek 兼容格式。
 
     DeepSeek Anthropic API 只接受 enabled/disabled 两种 type。
-    adaptive/auto 映射为 enabled（让 DeepSeek 自行决定何时思考）。
+    adaptive/auto 映射为 enabled（让 DeepSeek 自行管理思考时机）。
+
+    enabled 模式：过滤 redacted_thinking 块（DeepSeek 不支持）。
+    disabled 模式：剥离所有 thinking/redacted_thinking 块。
 
     同时清理 DeepSeek 不认识的字段：reasoning_effort、output_config。
-    当映射目标为 disabled 时，剥离历史中的 thinking/redacted_thinking
-    块（因为 DeepSeek 在 disabled 模式下不认识这些块）。
     """
     if "thinking" not in data:
         return False
@@ -371,14 +395,14 @@ def _normalize_thinking(data: dict) -> bool:
 
     thinking_type = thinking_cfg.get("type", "")
     if thinking_type in ("enabled", "disabled"):
-        # enabled/disabled 模式下仍需清理 DeepSeek 不识别的字段
+        # 清理 DeepSeek 不识别的字段
         cleaned = False
         for key in ("reasoning_effort", "output_config"):
             if data.pop(key, None) is not None:
                 logger.info("[THINKING] removed %s (type=%s)", key, thinking_type)
                 cleaned = True
         if thinking_type == "disabled":
-            # disabled 模式还需剥离历史中的 thinking 块
+            # disabled 模式需剥离历史中的 thinking 块
             stripped = 0
             for msg in data.get("messages", []):
                 if msg.get("role") != "assistant":
@@ -386,23 +410,31 @@ def _normalize_thinking(data: dict) -> bool:
                 content = msg.get("content", [])
                 if isinstance(content, str):
                     continue
-                new_content = [
-                    b for b in content
-                    if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
-                ]
-                if len(new_content) != len(content):
-                    stripped += len(content) - len(new_content)
-                    msg["content"] = new_content
+                stripped += _filter_content_blocks(content, ("thinking", "redacted_thinking"))
             if stripped > 0:
                 logger.info("[THINKING] stripped %d thinking blocks (type=disabled)", stripped)
                 cleaned = True
+        else:
+            # enabled 模式: 过滤 redacted_thinking（DeepSeek Anthropic API 不支持）
+            stripped = 0
+            for msg in data.get("messages", []):
+                if msg.get("role") != "assistant":
+                    continue
+                content = msg.get("content", [])
+                if isinstance(content, str):
+                    continue
+                stripped += _filter_content_blocks(content, ("redacted_thinking",))
+            if stripped > 0:
+                logger.info(
+                    "[THINKING] filtered %d redacted_thinking blocks (type=enabled)",
+                    stripped,
+                )
+                cleaned = True
         return cleaned
 
-    # Not(2026-06-19): adaptive/auto → disabled。
-    # 原因：DeepSeek 在 thinking=enabled 模式下容易陷入无限思考循环，
-    # 消耗全部 max_tokens 而无法输出实际内容（尤其是结构化 JSON 输出和
-    # 工具调用任务）。禁用 thinking 后模型直接输出，稳定性和可用性更好。
-    target = "disabled"
+    # adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）。
+    # 注意：工具调用和结构化 JSON 输出场景由 _should_disable_thinking() 精确保护。
+    target = "enabled"
     data["thinking"] = {"type": target}
 
     for key in ("reasoning_effort", "output_config"):
@@ -410,31 +442,7 @@ def _normalize_thinking(data: dict) -> bool:
         if val is not None:
             logger.info("[THINKING] removed %s=%s", key, val)
 
-    # enabled 模式下 DeepSeek 支持 thinking 块，不需要剥离历史
-    if target == "enabled":
-        logger.info("[THINKING] converted %s → %s", thinking_type, target)
-        return True
-
-    # disabled 模式需剥离历史中的 thinking 块
-    stripped = 0
-    for msg in data.get("messages", []):
-        if msg.get("role") != "assistant":
-            continue
-        content = msg.get("content", [])
-        if isinstance(content, str):
-            continue
-        new_content = [
-            b for b in content
-            if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
-        ]
-        if len(new_content) != len(content):
-            stripped += len(content) - len(new_content)
-            msg["content"] = new_content
-
-    logger.info(
-        "[THINKING] converted %s → %s, stripped %d thinking blocks",
-        thinking_type, target, stripped,
-    )
+    logger.info("[THINKING] converted %s → %s", thinking_type, target)
     return True
 
 
@@ -522,13 +530,16 @@ def _translate_anthropic_structured_output(data: dict) -> bool:
     return modified
 
 
-def _should_disable_thinking_for_structured_output(data: dict) -> bool:
-    """若响应需要结构化 JSON 输出且 thinking 开启，则返回 True 以强制关闭。
+def _should_disable_thinking(data: dict) -> bool:
+    """若请求处于 thinking 易失控场景，则返回 True 以强制关闭。
 
-    原因: DeepSeek 开启 thinking 时会先输出大量思考 token，当同时要求
-    response_format: json_object 时，思考可能消耗全部 max_tokens 导致
-    实际文本输出为空。此行为与 Anthropic 原版 API 一致（Anthropic 也禁止
-    thinking + forced tool use 同时使用）。
+    覆盖两种场景:
+    1. 结构化 JSON 输出（response_format / output_config / output_format）
+    2. 工具调用（有 tools 字段）— DeepSeek 在 thinking=enabled 时
+       可能为工具调用消耗全部 max_tokens 在思考上
+
+    注意: 此函数须在 _translate_anthropic_structured_output() 之前调用，
+    否则 output_config 字段会被 pop 导致漏检。
     """
     model = data.get("model", "")
     if not isinstance(model, str) or not model.startswith("deepseek-"):
@@ -538,13 +549,14 @@ def _should_disable_thinking_for_structured_output(data: dict) -> bool:
     if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
         return False
 
-    # 检查是否有结构化输出要求
-    has_response_format = "response_format" in data
-    has_output_config = "output_config" in data
-    has_output_format = "output_format" in data
+    # 场景 1: 结构化输出
+    if any(k in data for k in ("response_format", "output_config", "output_format")):
+        logger.info("[THINKING] disabling for structured output")
+        return True
 
-    if has_response_format or has_output_config or has_output_format:
-        logger.info("[ANTHROPIC] disabling thinking for structured output request")
+    # 场景 2: 工具调用 — 避免模型消耗全部 max_tokens 在思考上
+    if data.get("tools"):
+        logger.info("[THINKING] disabling for tool calls (has tools)")
         return True
 
     return False
@@ -652,14 +664,14 @@ async def proxy(request: Request):
                     logger.info("[INJECT] added empty thinking block")
                     thinking_normalized = True
 
-                # 翻译 Anthropic 结构化输出 → DeepSeek 兼容 (CODX-17)
-                if _translate_anthropic_structured_output(data):
+                # 在 _translate_anthropic_structured_output 之前检查，
+                # 避免 output_config 被 pop 后漏检（Codex 审查风险 #5）
+                if _should_disable_thinking(data):
+                    data["thinking"] = {"type": "disabled"}
                     thinking_normalized = True
 
-                # 若设置了 response_format 则禁用 thinking，避免模型
-                # 陷入无限思考循环耗尽 max_tokens 而无法输出 JSON
-                if _should_disable_thinking_for_structured_output(data):
-                    data["thinking"] = {"type": "disabled"}
+                # 翻译 Anthropic 结构化输出 → DeepSeek 兼容 (CODX-17)
+                if _translate_anthropic_structured_output(data):
                     thinking_normalized = True
 
                 if modified:
