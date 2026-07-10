@@ -16,13 +16,18 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org)
 [![CI](https://github.com/HosheaLi/dsv4-cc-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/HosheaLi/dsv4-cc-proxy/actions)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
+[![PyPI version](https://img.shields.io/pypi/v/dsv4-cc-proxy)](https://pypi.org/project/dsv4-cc-proxy/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/dsv4-cc-proxy)](https://pypi.org/project/dsv4-cc-proxy/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/hosheali/dsv4-cc-proxy)](https://hub.docker.com/r/hosheali/dsv4-cc-proxy)
 [![Docker Image Size](https://img.shields.io/docker/image-size/hosheali/dsv4-cc-proxy/latest)](https://hub.docker.com/r/hosheali/dsv4-cc-proxy)
+[![GHCR](https://img.shields.io/badge/GHCR-available-blue)](https://github.com/HosheaLi/dsv4-cc-proxy/pkgs/container/dsv4-cc-proxy)
 [![GitHub release](https://img.shields.io/github/v/release/HosheaLi/dsv4-cc-proxy)](https://github.com/HosheaLi/dsv4-cc-proxy/releases)
 [![GitHub stars](https://img.shields.io/github/stars/HosheaLi/dsv4-cc-proxy?style=social)](https://github.com/HosheaLi/dsv4-cc-proxy)
 [![GitHub last commit](https://img.shields.io/github/last-commit/HosheaLi/dsv4-cc-proxy)](https://github.com/HosheaLi/dsv4-cc-proxy/commits/main)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)](coverage.svg)
+[![Homebrew](https://img.shields.io/badge/homebrew-available-FBB040?logo=homebrew)](https://github.com/HosheaLi/homebrew-tap)
+[![Scoop](https://img.shields.io/badge/scoop-available-blue?logo=scoop)](https://github.com/HosheaLi/scoop-bucket)
 
 </div>
 
