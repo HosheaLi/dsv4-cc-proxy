@@ -77,24 +77,15 @@ jobs:
       id: deployment
       uses: actions/deploy-pages@v4
 
-  publish:
+  publish-github:
     runs-on: ubuntu-latest
     needs: [test, lint]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-      id-token: write
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
-
-    - name: Install build tools
-      run: pip install build
 
     - name: Extract version from tag
       id: tag
@@ -107,14 +98,19 @@ jobs:
         generate_release_notes: true
         name: v${{ steps.tag.outputs.VERSION }}
 
-    # --- PyPI publish (OIDC) ---
-    - name: Build sdist & wheel
-      run: python -m build
+  publish-docker:
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
 
-    - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        print-hash: true
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Extract version from tag
+      id: tag
+      run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
     # --- Docker publish ---
     - name: Set up Docker Buildx
@@ -145,14 +141,46 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
 
     # --- Post-publish verification ---
-    - name: Verify pip install
-      run: |
-        pip install dsv4-cc-proxy==${{ steps.tag.outputs.VERSION }}
-        python3 -c "from dsv4_cc_proxy import VERSION; print(VERSION)"
-
     - name: Verify docker image
       run: |
         docker run -d -p 16889:16889 --name verify-proxy hosheali/dsv4-cc-proxy:latest
         sleep 3
         curl -f http://localhost:16889/health
         docker stop verify-proxy
+
+  publish-pypi:
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install build tools
+      run: pip install build
+
+    # --- PyPI publish (token auth) ---
+    - name: Build sdist & wheel
+      run: python -m build
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        print-hash: true
+
+    # --- Post-publish verification ---
+    - name: Verify pip install
+      if: success()
+      run: |
+        pip install dsv4-cc-proxy==${{ steps.tag.outputs.VERSION }}
+        python3 -c "from dsv4_cc_proxy import VERSION; print(VERSION)"
