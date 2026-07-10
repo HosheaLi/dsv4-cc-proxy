@@ -17,6 +17,11 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 [![CI](https://github.com/HosheaLi/dsv4-cc-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/HosheaLi/dsv4-cc-proxy/actions)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)]()
 [![Docker Pulls](https://img.shields.io/docker/pulls/hosheali/dsv4-cc-proxy)](https://hub.docker.com/r/hosheali/dsv4-cc-proxy)
+[![Docker Image Size](https://img.shields.io/docker/image-size/hosheali/dsv4-cc-proxy/latest)](https://hub.docker.com/r/hosheali/dsv4-cc-proxy)
+[![GitHub release](https://img.shields.io/github/v/release/HosheaLi/dsv4-cc-proxy)](https://github.com/HosheaLi/dsv4-cc-proxy/releases)
+[![GitHub stars](https://img.shields.io/github/stars/HosheaLi/dsv4-cc-proxy?style=social)](https://github.com/HosheaLi/dsv4-cc-proxy)
+[![GitHub last commit](https://img.shields.io/github/last-commit/HosheaLi/dsv4-cc-proxy)](https://github.com/HosheaLi/dsv4-cc-proxy/commits/main)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)](coverage.svg)
 
 </div>
