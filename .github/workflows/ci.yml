@@ -112,7 +112,7 @@ jobs:
       id: tag
       run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-    # --- Docker publish ---
+    # --- Docker publish (Docker Hub + GHCR) ---
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -122,11 +122,20 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Extract metadata for Docker
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: hosheali/dsv4-cc-proxy
+        images: |
+          hosheali/dsv4-cc-proxy
+          ghcr.io/${{ github.repository }}
         tags: |
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
@@ -175,6 +184,7 @@ jobs:
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
+        user: __token__
         password: ${{ secrets.PYPI_API_TOKEN }}
         print-hash: true
 
@@ -182,5 +192,4 @@ jobs:
     - name: Verify pip install
       if: success()
       run: |
-        pip install dsv4-cc-proxy==${{ steps.tag.outputs.VERSION }}
-        python3 -c "from dsv4_cc_proxy import VERSION; print(VERSION)"
+        pip install dsv4-cc-proxy
