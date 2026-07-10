@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # ============== Phase 1: helper functions ==============
 
 
@@ -55,8 +54,9 @@ def test_default_pidfile_unix(monkeypatch):
 
 def test_port_available(monkeypatch):
     """_check_port_available 对可用端口返回 True。"""
-    from dsv4_cc_proxy.__main__ import _check_port_available
     import socket
+
+    from dsv4_cc_proxy.__main__ import _check_port_available
 
     # 找一个可用端口
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

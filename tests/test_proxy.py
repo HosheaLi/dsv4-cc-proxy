@@ -329,7 +329,7 @@ def test_translate_output_config_without_schema_noop():
 # 组 3: Unicode 引号标准化
 # =============================================================================
 
-from dsv4_cc_proxy.proxy import _normalize_quotes
+from dsv4_cc_proxy.proxy import _normalize_quotes  # noqa: E402
 
 
 def test_normalize_quotes_plain_string():
@@ -421,7 +421,7 @@ def test_normalize_quotes_all_targets():
 # 组 4: 日期格式标准化
 # =============================================================================
 
-from dsv4_cc_proxy.proxy import _normalize_text
+from dsv4_cc_proxy.proxy import _normalize_text  # noqa: E402
 
 
 def test_normalize_date_slash_to_dash():

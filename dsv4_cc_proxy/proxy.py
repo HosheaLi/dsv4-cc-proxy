@@ -22,6 +22,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import tempfile
 from contextlib import asynccontextmanager
@@ -187,9 +188,6 @@ async def health(request: Request):
 
 
 # ---- 修复 0: Unicode 引号标准化 ----
-
-import re
-
 # 目标字符映射: 将排版引号统一转换为 ASCII 单引号 (U+0027)
 _QUOTE_REPLACEMENTS = str.maketrans({
     '’': "'",   # 』 RIGHT SINGLE QUOTATION MARK
@@ -933,7 +931,8 @@ async def responses_handler(request: Request):
 
     try:
         # 临时: dump 原始和翻译后的 Codex 请求
-        import os as _os, tempfile as _tempfile
+        import os as _os
+        import tempfile as _tempfile
         _orig_path = _os.path.join(_tempfile.gettempdir(), "last_codex_original_request.json")
         with open(_orig_path, "w") as _f:
             json.dump(request_body, _f, ensure_ascii=False, indent=2, default=str)

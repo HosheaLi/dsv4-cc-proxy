@@ -360,7 +360,7 @@ def _translate_text_format(body: dict[str, Any]) -> tuple[dict[str, Any] | None,
         )
         if strict:
             schema_prompt += (
-                f" JSON MUST 严格遵守 schema。不允许额外字段。"
+                " JSON MUST 严格遵守 schema。不允许额外字段。"
             )
 
         logger.info(
@@ -494,7 +494,7 @@ def translate_request(request_body: dict[str, Any]) -> dict[str, Any]:
     body["messages"] = messages
 
     # 临时诊断 dump（所有路径都写）
-    import tempfile, json as _json
+    import json as _json
     _dump_path = os.path.join(tempfile.gettempdir(), "last_codex_chat_request.json")
     with open(_dump_path, "w") as _f:
         _json.dump(body, _f, ensure_ascii=False, indent=2, default=str)

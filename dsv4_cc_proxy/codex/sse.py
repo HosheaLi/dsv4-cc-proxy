@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
+
+# Unicode 引号替换表: 排版引号 → ASCII 单引号 (U+0027)
+import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterable
 from dataclasses import dataclass, field
 from uuid import uuid4
-
-# Unicode 引号替换表: 排版引号 → ASCII 单引号 (U+0027)
-import re
 
 _QUOTE_REPLACEMENTS = str.maketrans({
     '’': "'",   # 』 RIGHT SINGLE QUOTATION MARK
