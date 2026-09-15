@@ -32,6 +32,74 @@ Dockerfile                     # Docker 多阶段构建
 - 测试: `pip install .[test] && pytest tests/ -v`
 - 构建: `python -m build`
 
+## 启动方式
+
+### macOS (LaunchAgent) — 推荐
+
+通过 `launchctl` 管理，开机自启、崩溃自动重启。
+
+```bash
+# 安装/注册
+bash scripts/install_macos.sh
+
+# 启动
+launchctl load ~/Library/LaunchAgents/com.deepseek.thinking-proxy.plist
+
+# 停止
+launchctl unload ~/Library/LaunchAgents/com.deepseek.thinking-proxy.plist
+
+# 重启
+launchctl unload ~/Library/LaunchAgents/com.deepseek.thinking-proxy.plist \
+  && launchctl load ~/Library/LaunchAgents/com.deepseek.thinking-proxy.plist
+
+# 查看状态
+launchctl list | grep deepseek
+
+# 查看日志
+tail -f ~/.claude/proxy/proxy.log
+```
+
+配置: `~/.claude/proxy/` 下的环境变量（`PROXY_UPSTREAM`、`PROXY_LOG_LEVEL` 等）
+
+### 命令行 (直接启动)
+
+```bash
+# 启动 (默认端口 16889)
+python -m dsv4_cc_proxy
+
+# 启动 + 看门狗 (崩溃自动重启, 最多 5 次)
+python -m dsv4_cc_proxy --watchdog
+
+# 停止 (读取 /tmp/dsv4-cc-proxy.pid)
+python -m dsv4_cc_proxy --stop
+
+# 指定 PID 文件路径
+python -m dsv4_cc_proxy --pidfile ~/.claude/proxy/proxy.pid
+```
+
+### Docker
+
+```bash
+docker-compose up -d          # 启动
+docker-compose down           # 停止
+docker-compose up -d --build  # 重新构建并启动
+```
+
+### Windows
+
+- 安装服务: `powershell scripts/install_windows_service.ps1`
+- 手动启动: `scripts/start.ps1` 或 `scripts/start.bat`
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PROXY_UPSTREAM` | `https://api.deepseek.com/anthropic` | 上游 API 地址 |
+| `PROXY_LOG_LEVEL` | `warning` | 日志级别 |
+| `PROXY_DUMP_DIR` | 空 | 调试转储目录 |
+| `CODEX_DEFAULT_MODEL` | `deepseek-v4-pro` | Codex 默认模型 |
+| `CODEX_MODEL_MAP` | 空 | Codex 模型映射 JSON |
+
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 

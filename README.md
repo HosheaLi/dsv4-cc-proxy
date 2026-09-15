@@ -33,6 +33,16 @@ Claude Code ←→ localhost:16889 (dsv4-cc-proxy) ←→ api.deepseek.com/anthr
 
 ---
 
+## Maintenance Status
+
+> [!NOTE]
+> **This project is no longer actively maintained.** The author has moved off Claude Code, so there is no ongoing development.
+>
+> - It remains **functional** — the latest release works as documented below.
+> - **Pull requests are welcome** and will be reviewed when time permits.
+> - Issues may go unanswered.
+> - MIT licensed: you are free to fork and continue this project. If you would like to take over maintenance, please open an issue.
+
 ## What's New in v2.1.0
 
 | Feature | Description |
