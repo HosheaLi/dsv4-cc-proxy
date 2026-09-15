@@ -6,6 +6,7 @@
 运行: python3 -m pytest tests/test_responses.py -v
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -251,6 +252,52 @@ class TestAuthPassthrough:
         assert call_kwargs is not None
         _, kwargs = call_kwargs
         assert kwargs.get("headers", {}).get("authorization") == ""
+
+
+class TestRequestBodyForwarding:
+    """请求体透传：body 必须与透传的 content-length 保持一致。
+
+    回归 issue #8 —— /v1/messages/count_tokens 曾被判为非 messages 端点，
+    body 被丢弃但 content-length 仍原样转发，上游 h11 层报
+    "Too little data for declared Content-Length"。
+    """
+
+    def test_count_tokens_body_forwarded(self, client):
+        """count_tokens 子端点的请求体被完整转发。"""
+        payload = {
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        mock_resp = _MockJSONResponse(status_code=200, json_data={"input_tokens": 5})
+
+        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
+            mock_client = AsyncMock(spec=httpx.AsyncClient)
+            mock_client.build_request.return_value = MagicMock(spec=httpx.Request)
+            mock_client.send.return_value = mock_resp
+            mock_get_client.return_value = mock_client
+
+            resp = client.post("/v1/messages/count_tokens", json=payload)
+
+        assert resp.status_code == 200
+        _, kwargs = mock_client.build_request.call_args
+        assert json.loads(kwargs["content"]) == payload
+
+    def test_non_messages_post_body_forwarded(self, client):
+        """非 messages 的 POST 路径，请求体同样不能被丢弃。"""
+        payload = {"model": "deepseek-v4-pro", "input": "hi"}
+        mock_resp = _MockJSONResponse(status_code=200, json_data={"ok": True})
+
+        with patch("dsv4_cc_proxy.proxy._get_client") as mock_get_client:
+            mock_client = AsyncMock(spec=httpx.AsyncClient)
+            mock_client.build_request.return_value = MagicMock(spec=httpx.Request)
+            mock_client.send.return_value = mock_resp
+            mock_get_client.return_value = mock_client
+
+            resp = client.post("/v1/legacy-complete", json=payload)
+
+        assert resp.status_code == 200
+        _, kwargs = mock_client.build_request.call_args
+        assert json.loads(kwargs["content"]) == payload
 
 
 class TestUpstreamError:

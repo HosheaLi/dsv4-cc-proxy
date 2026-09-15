@@ -6,13 +6,23 @@
 
 import json
 
+import pytest
+
 from dsv4_cc_proxy.proxy import (
+    _ENV_STORE,
+    _SKILLS_STORE,
+    _append_to_user_message,
+    _compute_append_delta,
+    _compute_session_key,
     _consolidate_system_messages,
+    _freeze_env_context,
+    _freeze_skills_block,
     _has_thinking,
     _has_tool_use,
     _inject_thinking_blocks,
     _normalize_thinking,
     _should_disable_thinking,
+    _strip_cache_control,
     _translate_anthropic_structured_output,
 )
 
@@ -114,8 +124,8 @@ def test_normalize_disabled_unchanged():
     assert data["thinking"]["type"] == "disabled"
 
 
-def test_normalize_adaptive_converts_to_enabled():
-    """adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）。"""
+def test_normalize_adaptive_preserves_adaptive():
+    """adaptive → adaptive 透传（模型自行判断何时思考）。"""
     data = {
         "thinking": {"type": "adaptive"},
         "messages": [
@@ -126,8 +136,8 @@ def test_normalize_adaptive_converts_to_enabled():
         ]
     }
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "enabled"
-    # enabled 模式不剥离 thinking 块（保持缓存命中）
+    assert data["thinking"]["type"] == "adaptive"
+    # 透传模式保留 thinking 块（不修改历史）
     content = data["messages"][0]["content"]
     assert len(content) == 2
     assert content[0]["type"] == "thinking"
@@ -138,14 +148,16 @@ def test_normalize_adaptive_removes_effort():
     data = {"thinking": {"type": "adaptive"}, "reasoning_effort": "max"}
     _normalize_thinking(data)
     assert "reasoning_effort" not in data
-    assert data["thinking"]["type"] == "enabled"
+    assert data["thinking"]["type"] == "adaptive"
 
 
-def test_normalize_adaptive_removes_output_config():
+def test_normalize_adaptive_preserves_output_config():
+    """adaptive 透传时保留 output_config（DeepSeek Anthropic API 支持 effort 子字段）。"""
     data = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}}
     _normalize_thinking(data)
-    assert "output_config" not in data
-    assert data["thinking"]["type"] == "enabled"
+    assert "output_config" in data
+    assert data["output_config"]["effort"] == "max"
+    assert data["thinking"]["type"] == "adaptive"
 
 
 def test_normalize_no_thinking_key():
@@ -156,17 +168,17 @@ def test_normalize_no_thinking_key():
 
 
 def test_normalize_thinking_no_messages_key():
-    """data 无 messages 键 -> True（thinking 被修改为 enabled）。"""
+    """data 无 messages 键 -> True（thinking 透传为 adaptive）。"""
     data = {"thinking": {"type": "adaptive"}}
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "enabled"
+    assert data["thinking"]["type"] == "adaptive"
 
 
 def test_normalize_thinking_unknown_type():
-    """未知 thinking type -> 转换为 enabled。"""
+    """未知 thinking type -> 透传为 adaptive（如 auto → adaptive）。"""
     data = {"thinking": {"type": "auto"}, "messages": [{"role": "user", "content": "hi"}]}
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "enabled"
+    assert data["thinking"]["type"] == "adaptive"
 
 
 def test_inject_thinking_blocks_non_dict_thinking():
@@ -825,11 +837,13 @@ def test_normalize_enabled_cleans_reasoning_effort():
     assert data["thinking"]["type"] == "enabled"
 
 
-def test_adaptive_to_enabled_with_tools_protection():
-    """adaptive → enabled + tools → _should_disable_thinking 保护触发。
+def test_adaptive_with_tools_disables_thinking():
+    """adaptive + tools → _should_disable_thinking 返回 True。
 
-    验证完整调用链：_normalize_thinking 先设为 enabled，
-    然后 _should_disable_thinking 检测到 tools 后重新 disabled。
+    _should_disable_thinking 对 enabled 和 adaptive 均生效。
+    工具调用不需要思考，代理关闭以省 token。
+    注意: _normalize_thinking 先保留 adaptive（不剥离历史思考块），
+    然后 _should_disable_thinking 关闭当前请求的 thinking。
     """
     data = {
         "model": "deepseek-v4-pro",
@@ -837,11 +851,370 @@ def test_adaptive_to_enabled_with_tools_protection():
         "tools": [{"name": "read_file", "input_schema": {}}],
         "messages": [{"role": "user", "content": "read the file"}],
     }
-    # Step 1: _normalize_thinking → enabled
+    # Step 1: _normalize_thinking → adaptive 透传，保留历史思考块
     assert _normalize_thinking(data)
-    assert data["thinking"]["type"] == "enabled"
+    assert data["thinking"]["type"] == "adaptive"
     # Step 2: _should_disable_thinking → tools detected → True
     assert _should_disable_thinking(data)
     # Step 3: 调用方设置 disabled
     data["thinking"] = {"type": "disabled"}
     assert data["thinking"]["type"] == "disabled"
+
+
+# === 会话键计算 ===
+
+
+def test_compute_session_key_stable():
+    """同一 system+tool 应产生相同会话键。"""
+    d1 = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Skills list... growing..."},
+            {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin"},
+        ],
+        "tools": [{"name": "Bash", "description": "run commands"}],
+    }
+    d2 = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Skills list... EVEN BIGGER..."},
+            {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin"},
+        ],
+        "tools": [{"name": "Bash", "description": "run commands"}],
+    }
+    assert _compute_session_key(d1) == _compute_session_key(d2)
+
+
+def test_compute_session_key_different():
+    """不同 system[0] 或 tools 应产生不同会话键。"""
+    d1 = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Skills..."},
+        ],
+        "tools": [{"name": "Bash"}],
+    }
+    d2 = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "You are Claude Code — Different Edition."},
+            {"type": "text", "text": "Skills..."},
+        ],
+        "tools": [{"name": "Bash"}],
+    }
+    assert _compute_session_key(d1) != _compute_session_key(d2)
+
+
+def test_compute_session_key_same_despite_env_diff():
+    """环境上下文变化不应改变会话键。"""
+    d1 = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Skills..."},
+            {"type": "text", "text": "Env: project A"},
+        ],
+        "tools": [{"name": "Bash"}],
+    }
+    d2 = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Skills... EVEN BIGGER..."},
+            {"type": "text", "text": "Env: project B"},
+        ],
+        "tools": [{"name": "Bash"}],
+    }
+    assert _compute_session_key(d1) == _compute_session_key(d2)
+
+
+def test_compute_session_key_no_system():
+    """system 为空列表时仍应工作。"""
+    d = {"model": "deepseek-v4-pro", "system": []}
+    assert isinstance(_compute_session_key(d), str)
+    assert len(_compute_session_key(d)) == 16
+
+
+# === 增量计算 ===
+
+
+def test_compute_append_delta_pure_append():
+    frozen = "line1\nline2\n"
+    current = "line1\nline2\nline3\nline4\n"
+    delta = _compute_append_delta(frozen, current)
+    assert delta == ["line3", "line4"]
+
+
+def test_compute_append_delta_no_change():
+    frozen = "line1\nline2\nline3\n"
+    current = "line1\nline2\nline3\n"
+    delta = _compute_append_delta(frozen, current)
+    assert delta == []
+
+
+def test_compute_append_delta_replacement_returns_none():
+    frozen = "line1\nline2\n"
+    current = "line1\nline2_modified\n"
+    delta = _compute_append_delta(frozen, current)
+    assert delta is None
+
+
+def test_compute_append_delta_deletion_returns_none():
+    frozen = "line1\nline2\nline3\n"
+    current = "line1\nline3\n"
+    delta = _compute_append_delta(frozen, current)
+    assert delta is None
+
+
+# === 用户消息追加 ===
+
+
+def test_append_to_user_message_string_content():
+    data = {"messages": [{"role": "user", "content": "hello"}]}
+    assert _append_to_user_message(data, "<update>new info</update>")
+    assert "<update>new info</update>" in str(data["messages"][0]["content"])
+
+
+def test_append_to_user_message_list_content():
+    data = {"messages": [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+    ]}
+    assert _append_to_user_message(data, "extra")
+    assert data["messages"][0]["content"][-1] == {"type": "text", "text": "extra"}
+
+
+def test_append_to_user_message_finds_last_user():
+    data = {"messages": [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "response"},
+        {"role": "user", "content": "second"},
+    ]}
+    _append_to_user_message(data, "delta")
+    assert "delta" in data["messages"][2]["content"]
+
+
+def test_append_to_user_message_no_user():
+    data = {"messages": [{"role": "assistant", "content": "only assistant"}]}
+    assert not _append_to_user_message(data, "delta")
+
+
+def test_append_to_user_message_no_messages():
+    data = {"messages": []}
+    assert not _append_to_user_message(data, "delta")
+
+
+# === Skills 冻结 ===
+
+
+def _make_skills_request(system_blocks, model="deepseek-v4-pro"):
+    """构造最小化请求用于 Skills 冻结测试。"""
+    return {
+        "model": model,
+        "system": system_blocks,
+        "tools": [{"name": "test_tool"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+    }
+
+
+def test_skills_freeze_first_request():
+    """首请求应记录锚点，不触发修改。"""
+    data = _make_skills_request([
+        {"type": "text", "text": "You are Claude Code."},
+        {"type": "text", "text": "Skills: A, B, C"},
+        {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin"},
+    ])
+    result = _freeze_skills_block(data)
+    assert not result  # 首请求不修改 body
+    assert data["system"][1]["text"] == "Skills: A, B, C"  # 内容不变
+
+
+def test_skills_freeze_same_content():
+    """相同 Skills 内容不触发修改。"""
+    blocks = [
+        {"type": "text", "text": "You are Claude Code."},
+        {"type": "text", "text": "Skills: A, B, C"},
+        {"type": "text", "text": "Working directory: /Users/test"},
+    ]
+    _freeze_skills_block(_make_skills_request(blocks))
+    data2 = _make_skills_request(blocks)
+    result = _freeze_skills_block(data2)
+    assert not result
+
+
+def test_skills_freeze_append_only():
+    """Skills 追加行时用锚点替换并产生增量。"""
+    blocks1 = [
+        {"type": "text", "text": "You are Claude Code."},
+        {"type": "text", "text": "skill_a\nskill_b"},
+        {"type": "text", "text": "Working directory: /test"},
+    ]
+    _freeze_skills_block(_make_skills_request(blocks1))
+
+    blocks2 = [
+        {"type": "text", "text": "You are Claude Code."},
+        {"type": "text", "text": "skill_a\nskill_b\nskill_c\nskill_d"},
+        {"type": "text", "text": "Working directory: /test"},
+    ]
+    data2 = _make_skills_request(blocks2)
+    result = _freeze_skills_block(data2)
+    assert result
+    assert data2["system"][1]["text"] == "skill_a\nskill_b"  # 锚点替换
+    # 增量追加到 user 消息
+    user_content = data2["messages"][0]["content"]
+    assert isinstance(user_content, list)
+    update_block = user_content[-1]
+    assert update_block["type"] == "text"
+    assert "skill_c" in update_block["text"]
+    assert "skill_d" in update_block["text"]
+
+
+def test_skills_freeze_non_deepseek():
+    """非 deepseek 模型应跳过。"""
+    data = _make_skills_request(
+        [{"type": "text", "text": "A"}, {"type": "text", "text": "B"}, {"type": "text", "text": "C"}],
+        model="claude-opus-4-7",
+    )
+    assert not _freeze_skills_block(data)
+
+
+def test_skills_freeze_insufficient_blocks():
+    """system 块数不足时跳过。"""
+    data = _make_skills_request([
+        {"type": "text", "text": "A"},
+        {"type": "text", "text": "B"},
+    ])
+    assert not _freeze_skills_block(data)
+
+
+# === 环境上下文冻结 ===
+
+
+@pytest.fixture(autouse=True)
+def _clear_stores():
+    """每个测试前清空全局状态存储，避免跨测试污染。"""
+    _SKILLS_STORE.clear()
+    _ENV_STORE.clear()
+
+
+def _make_env_request(system_blocks, model="deepseek-v4-pro"):
+    return {
+        "model": model,
+        "system": system_blocks,
+        "tools": [{"name": "test_tool"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+    }
+
+
+def test_env_freeze_first_request():
+    data = _make_env_request([
+        {"type": "text", "text": "Instructions..."},
+        {"type": "text", "text": "Skills..."},
+        {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin\nOS Version: Darwin"},
+    ])
+    result = _freeze_env_context(data)
+    assert not result
+
+
+def test_env_freeze_same_content():
+    blocks = [
+        {"type": "text", "text": "Instructions..."},
+        {"type": "text", "text": "Skills..."},
+        {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin"},
+    ]
+    _freeze_env_context(_make_env_request(blocks))
+    result = _freeze_env_context(_make_env_request(blocks))
+    assert not result
+
+
+def test_env_freeze_delta():
+    blocks1 = [
+        {"type": "text", "text": "Instructions..."},
+        {"type": "text", "text": "Skills..."},
+        {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin"},
+    ]
+    _freeze_env_context(_make_env_request(blocks1))
+
+    blocks2 = [
+        {"type": "text", "text": "Instructions..."},
+        {"type": "text", "text": "Skills..."},
+        {"type": "text", "text": "Working directory: /Users/test\nPlatform: darwin\ngitStatus: dirty"},
+    ]
+    data2 = _make_env_request(blocks2)
+    result = _freeze_env_context(data2)
+    assert result
+    assert data2["system"][2]["text"] == "Working directory: /Users/test\nPlatform: darwin"
+    user_content = data2["messages"][0]["content"]
+    assert isinstance(user_content, list)
+    assert "gitStatus: dirty" in str(user_content[-1]["text"])
+
+
+def test_env_freeze_non_deepseek():
+    data = _make_env_request([
+        {"type": "text", "text": "A"},
+        {"type": "text", "text": "B"},
+        {"type": "text", "text": "Working directory: /test"},
+    ], model="claude-opus-4-7")
+    assert not _freeze_env_context(data)
+
+
+def test_env_freeze_no_env_marker():
+    data = _make_env_request([
+        {"type": "text", "text": "A"},
+        {"type": "text", "text": "B"},
+        {"type": "text", "text": "No env markers here"},
+    ])
+    assert not _freeze_env_context(data)
+
+
+def test_env_freeze_string_system():
+    data = {
+        "model": "deepseek-v4-pro",
+        "system": "You are Claude Code",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    assert not _freeze_env_context(data)
+
+
+# === cache_control 移除 ===
+
+
+def test_strip_cache_control_system():
+    data = {
+        "model": "deepseek-v4-pro",
+        "system": [
+            {"type": "text", "text": "A", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "B", "cache_control": {"type": "ephemeral"}},
+        ],
+    }
+    removed = _strip_cache_control(data)
+    assert removed == 2
+    assert "cache_control" not in data["system"][0]
+    assert "cache_control" not in data["system"][1]
+
+
+def test_strip_cache_control_messages():
+    data = {
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "A", "cache_control": {"type": "ephemeral"}}
+            ]},
+        ],
+    }
+    removed = _strip_cache_control(data)
+    assert removed == 1
+    assert "cache_control" not in data["messages"][0]["content"][0]
+
+
+def test_strip_cache_control_none_present():
+    data = {"model": "deepseek-v4-pro", "system": [{"type": "text", "text": "A"}]}
+    removed = _strip_cache_control(data)
+    assert removed == 0
+
+
+def test_strip_cache_control_empty():
+    data = {}
+    removed = _strip_cache_control(data)
+    assert removed == 0

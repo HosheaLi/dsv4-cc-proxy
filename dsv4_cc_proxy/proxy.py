@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -25,6 +26,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -59,6 +61,18 @@ def _get_port() -> int:
 _PORT: int | None = None  # 惰性初始化缓存
 LOG_LEVEL = os.getenv("PROXY_LOG_LEVEL", "warning")
 DUMP_DIR = os.getenv("PROXY_DUMP_DIR", "")
+CACHE_REORDER = os.getenv("PROXY_CACHE_REORDER", "1") == "1"
+NORMALIZE_QUOTES = os.getenv("PROXY_NORMALIZE_QUOTES", "1") == "1"
+SKILLS_FREEZE = os.getenv("PROXY_SKILLS_FREEZE", "1") == "1"
+ENV_FREEZE = os.getenv("PROXY_ENV_FREEZE", "1") == "1"
+CANONICAL_JSON = os.getenv("PROXY_CANONICAL_JSON", "1") == "1"
+STRIP_CACHE_CTRL = os.getenv("PROXY_STRIP_CACHE_CTRL", "1") == "1"
+_SESSION_KEY_SALT = os.getenv("PROXY_SESSION_SALT", "dsv4-cc-proxy-v1")
+_SKILLS_STORE_MAX = 512
+
+# 可能携带请求体的 HTTP 方法。这些方法下必须读取 body 再转发，
+# 因为 content-length 是原样透传给上游的（见 proxy()）。
+_METHODS_WITH_BODY = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # SSE 流处理参数上限
 MAX_EVENT_TYPES = 50
@@ -73,22 +87,42 @@ LOG_BACKUP_COUNT = int(os.getenv("PROXY_LOG_BACKUP_COUNT", "3"))
 log_format = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 log_level = getattr(logging, LOG_LEVEL.upper(), logging.WARNING)
 
-_stream_handler = logging.StreamHandler(sys.stdout)
-_stream_handler.setFormatter(log_format)
-
 _root = logging.getLogger()
 _root.setLevel(log_level)
 _root.handlers.clear()
-_root.addHandler(_stream_handler)
 
 if LOG_FILE:
+    # 有指定日志文件 → 仅写入文件（带轮转保护，防止磁盘占满）
     _file_handler = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
     )
     _file_handler.setFormatter(log_format)
     _root.addHandler(_file_handler)
+else:
+    # 无日志文件 → stdout（launchctl 会捕获到 StandardOutPath）
+    _stream_handler = logging.StreamHandler(sys.stdout)
+    _stream_handler.setFormatter(log_format)
+    _root.addHandler(_stream_handler)
 
 logger = logging.getLogger("deepseek-proxy")
+
+# ---- 始终启用的请求缓存（调试用） ----
+_LAST_REQUEST: dict | None = None
+_LAST_MODIFIED_REQUEST: dict | None = None
+_LAST_RESPONSE_SUMMARY: dict | None = None
+# 累计缓存统计（跟踪跨请求累积值，非最新会话 delta）
+LAST_CACHE_ACCUMULATED: dict | None = None
+LAST_CACHE_DELTA: dict | None = None  # 本次请求增量（而非累计值）
+
+
+def _get_last_request() -> dict | None:
+    """获取最近一次捕获到的原始请求（始终可用，不需要 PROXY_DUMP_DIR）。"""
+    return _LAST_REQUEST
+
+
+def _get_last_modified_request() -> dict | None:
+    """获取最近一次修改后发送到 DeepSeek 的请求。"""
+    return _LAST_MODIFIED_REQUEST
 
 _shared_client: httpx.AsyncClient | None = None
 
@@ -305,6 +339,331 @@ def _consolidate_system_messages(data: dict) -> tuple:
     return True, count
 
 
+# ---- 修复 4: System blocks 重排序 + 拆分以优化 prompt cache 命中率 ----
+
+_SKILLS_BLOCK_MARKER = "The following skills are available for use with the Skill tool:"
+
+
+def _reorder_system_blocks(data: dict) -> bool:
+    """将不变的 Skills 定义移到可变内容之前，最大化 prompt cache 公共前缀。
+
+    问题:
+      Claude Code 的 system prompt 中，Skills 列表嵌在一个大 block 内部，
+      前面有 SessionStart hook 输出（每个会话不同）和 agents/MCP 定义。
+      这导致整个 ~37KB 的 block 在跨会话时无法命中 cache。
+
+    策略:
+      找到包含 Skills marker 的 block，在 marker 处拆分为两部分:
+        - 前半部分: SessionStart hooks + agents + MCP (会话间可变)
+        - 后半部分: Skills 列表 + 后续内容 (会话间不变, ~30KB+)
+      将后半部分（Skills）移到 Block 0 之后，构成 ~30KB+ 的公共前缀。
+
+    仅对 deepseek-* 模型生效；system 为字符串时不处理。
+    """
+    model = data.get("model", "")
+    if not isinstance(model, str) or not model.startswith("deepseek-"):
+        return False
+
+    system = data.get("system")
+    if not isinstance(system, list) or len(system) < 3:
+        return False
+
+    # 1. 找到包含 skills marker 的 block 及其在 block 内的位置
+    skills_block_idx = None
+    marker_pos = -1
+    for i, block in enumerate(system):
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text", "")
+        if isinstance(text, str):
+            pos = text.find(_SKILLS_BLOCK_MARKER)
+            if pos >= 0:
+                skills_block_idx = i
+                marker_pos = pos
+                break
+
+    if skills_block_idx is None:
+        return False
+
+    block_text = system[skills_block_idx].get("text", "")
+
+    # 2. 如果 marker 在 block 开头附近（<200 chars），
+    #    整个 block 基本上就是 Skills 列表，直接移动
+    if marker_pos < 200:
+        if skills_block_idx == 1:
+            return False  # 已在正确位置
+        skills_block = system.pop(skills_block_idx)
+        system.insert(1, skills_block)
+        logger.info(
+            "[CACHE] moved skills block %d → 1 (%d chars)",
+            skills_block_idx, len(block_text),
+        )
+        return True
+
+    # 3. Marker 嵌在 block 内部 — 在 marker 处拆分为两个 block
+    pre_text = block_text[:marker_pos].rstrip()
+    skills_text = block_text[marker_pos:]
+
+    # 替换原来的 block: 前半部分留在原位置
+    system[skills_block_idx] = {
+        "type": "text",
+        "text": pre_text,
+    }
+
+    # 后半部分 (Skills 列表) 插入到位置 1 (紧接 Block 0)
+    system.insert(1, {
+        "type": "text",
+        "text": skills_text,
+    })
+
+    logger.info(
+        "[CACHE] split block %d at pos %d: pre=%d chars → position %d, skills=%d chars → position 1",
+        skills_block_idx, marker_pos,
+        len(pre_text), skills_block_idx if skills_block_idx < 1 else skills_block_idx + 1,
+        len(skills_text),
+    )
+    return True
+
+
+# ---- 缓存前缀稳定化: 会话键 + Skills 冻结 + 环境冻结 ----
+
+
+def _compute_session_key(data: dict) -> str:
+    """基于 tools + system 的稳定部分计算会话标识。
+
+    仅包含 tools 和 system[0]（"You are Claude Code..." 标识块），
+    排除 Skills 块和环境上下文块（它们在会话内可能变化）。
+    同一会话的 tools + system[0] 不变，跨会话/项目不同。
+    """
+    system = data.get("system")
+    tools = data.get("tools")
+
+    parts: list[str] = [_SESSION_KEY_SALT]
+    if isinstance(tools, list):
+        parts.append(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+    if isinstance(system, list) and len(system) > 0:
+        block0 = system[0]
+        text = block0.get("text", "") if isinstance(block0, dict) else str(block0)
+        parts.append(text)
+
+    payload = "\n".join(parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+# ---- Skills 块冻结 ----
+
+_SKILLS_STORE: OrderedDict[str, str] = OrderedDict()
+_SKILLS_LOCK = asyncio.Lock()
+
+
+def _freeze_skills_block(data: dict) -> bool:
+    """冻结 Skills 块内容到首请求快照，仅发送增量变化。
+
+    system[1] 是 _reorder_system_blocks 移至正确位置的 Skills 块。
+    首请求记录完整内容作为锚点；后续请求用锚点替换增长后的 Skills，
+    仅追加新增（非替换/删除）行到 messages 末尾。
+
+    仅对 deepseek-* 模型生效。
+    """
+    model = data.get("model", "")
+    if not isinstance(model, str) or not model.startswith("deepseek-"):
+        return False
+
+    system = data.get("system")
+    if not isinstance(system, list) or len(system) < 3:
+        return False
+
+    skills_block = system[1]
+    if not isinstance(skills_block, dict) or "text" not in skills_block:
+        return False
+
+    current = skills_block["text"]
+    session_key = _compute_session_key(data)
+
+    if session_key not in _SKILLS_STORE:
+        _SKILLS_STORE[session_key] = current
+        _SKILLS_STORE.move_to_end(session_key)
+        # LRU 淘汰
+        while len(_SKILLS_STORE) > _SKILLS_STORE_MAX:
+            _SKILLS_STORE.popitem(last=False)
+        logger.info("[SKILLS] anchor recorded: session=%s len=%d", session_key, len(current))
+        return False
+
+    frozen = _SKILLS_STORE[session_key]
+    _SKILLS_STORE.move_to_end(session_key)
+
+    if current == frozen:
+        return False
+
+    # 检测变化类型: 仅追加行 vs 替换/删除
+    delta = _compute_append_delta(frozen, current)
+    if delta is None:
+        # 非纯追加 — 重置锚点
+        _SKILLS_STORE[session_key] = current
+        logger.info("[SKILLS] non-append change detected, anchor reset: session=%s", session_key)
+        return True  # 请求体已变（锚点更新）
+
+    # 用锚点替换，增量追加
+    skills_block["text"] = frozen
+    if delta:
+        _append_to_user_message(data,
+            "<skill-update>\n" + "\n".join(delta) + "\n</skill-update>")
+    logger.info("[SKILLS] frozen: session=%s anchor=%d current=%d delta=%d lines",
+                session_key, len(frozen), len(current), len(delta))
+    return True
+
+
+def _compute_append_delta(frozen: str, current: str) -> list[str] | None:
+    """计算从 frozen 到 current 的纯追加行列表。
+
+    如果 current 以 frozen 内容为前缀（逐行比较），返回新增行。
+    如果检测到任何行的修改或删除，返回 None 表示需要重置锚点。
+    """
+    frozen_lines = frozen.splitlines()
+    current_lines = current.splitlines()
+
+    if len(current_lines) < len(frozen_lines):
+        return None  # 删除行
+
+    # 逐行验证前缀匹配
+    for i, fl in enumerate(frozen_lines):
+        if i >= len(current_lines) or current_lines[i] != fl:
+            return None  # 修改或删除
+
+    # 纯追加
+    return current_lines[len(frozen_lines):]
+
+
+def _append_to_user_message(data: dict, text: str) -> bool:
+    """追加文本内容到最后一条 role=user 的消息末尾。
+
+    向前遍历 messages 找到最后一条 user 消息，避免违反 role 交替规则。
+    """
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = content + "\n\n" + text
+            return True
+        if isinstance(content, list):
+            content.append({"type": "text", "text": text})
+            return True
+
+    return False
+
+
+# ---- 环境上下文冻结 ----
+
+_ENV_MARKERS = (
+    "Working directory",
+    "Is directory a git repo",
+    "gitStatus",
+    "Platform:",
+    "OS Version",
+    "Current branch",
+    "Recent commits",
+    "Today's date",
+)
+_ENV_STORE: OrderedDict[str, str] = OrderedDict()
+_ENV_LOCK = asyncio.Lock()
+
+
+def _freeze_env_context(data: dict) -> bool:
+    """冻结环境上下文块到首请求快照，仅发送差异行。
+
+    检测 system 中包含环境标记（cwd/git/os/date）的块，
+    首请求记录内容为锚点，后续请求用锚点替换并将增量追加到
+    最后一条 user 消息。
+
+    仅对 deepseek-* 模型生效。
+    """
+    model = data.get("model", "")
+    if not isinstance(model, str) or not model.startswith("deepseek-"):
+        return False
+
+    system = data.get("system")
+    if not isinstance(system, list):
+        return False
+
+    env_idx: int | None = None
+    for i, block in enumerate(system):
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text", "")
+        if not isinstance(text, str):
+            continue
+        if any(m in text for m in _ENV_MARKERS):
+            env_idx = i
+            break
+
+    if env_idx is None:
+        return False
+
+    current = system[env_idx]["text"]
+    session_key = _compute_session_key(data)
+
+    if session_key not in _ENV_STORE:
+        _ENV_STORE[session_key] = current
+        _ENV_STORE.move_to_end(session_key)
+        while len(_ENV_STORE) > _SKILLS_STORE_MAX:
+            _ENV_STORE.popitem(last=False)
+        logger.info("[ENV] anchor recorded: session=%s len=%d", session_key, len(current))
+        return False
+
+    frozen = _ENV_STORE[session_key]
+    _ENV_STORE.move_to_end(session_key)
+
+    if current == frozen:
+        return False
+
+    system[env_idx]["text"] = frozen
+
+    frozen_set = set(frozen.splitlines())
+    delta = [ln for ln in current.splitlines() if ln.strip() and ln not in frozen_set]
+    if delta:
+        _append_to_user_message(data,
+            "<env-update>\n" + "\n".join(delta) + "\n</env-update>")
+    logger.info("[ENV] frozen: session=%s anchor=%d current=%d delta=%d lines",
+                session_key, len(frozen), len(current), len(delta))
+    return True
+
+
+# ---- cache_control 移除 ----
+
+
+def _strip_cache_control(data: dict) -> int:
+    """递归移除 data 中所有 cache_control 键。返回移除数量。
+
+    DeepSeek 不支持 cache_control 且不读取这些标记。
+    Claude Code 会滑动其位置，导致字节级前缀偏移。
+    """
+    removed = 0
+
+    def walk(obj: Any) -> None:
+        nonlocal removed
+        if isinstance(obj, dict):
+            if "cache_control" in obj:
+                del obj["cache_control"]
+                removed += 1
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+    if removed:
+        logger.info("[STRIP] removed %d cache_control entries", removed)
+    return removed
+
+
 # ---- 修复 1: 请求端 thinking 注入 ----
 
 
@@ -375,15 +734,14 @@ def _filter_content_blocks(content: list, exclude_types: tuple[str, ...]) -> int
 
 
 def _normalize_thinking(data: dict) -> bool:
-    """将非标准 thinking type 标准化为 DeepSeek 兼容格式。
+    """标准化 thinking type 并清理不兼容字段。
 
-    DeepSeek Anthropic API 只接受 enabled/disabled 两种 type。
-    adaptive/auto 映射为 enabled（让 DeepSeek 自行管理思考时机）。
+    adaptive → 透传，保留思考内容（用户可看到思考过程）。
+    enabled → 过滤 redacted_thinking 块（DeepSeek 不支持），保留 thinking。
+    disabled → 剥离所有 thinking/redacted_thinking 块（DeepSeek 不认识）。
 
-    enabled 模式：过滤 redacted_thinking 块（DeepSeek 不支持）。
-    disabled 模式：剥离所有 thinking/redacted_thinking 块。
-
-    同时清理 DeepSeek 不认识的字段：reasoning_effort、output_config。
+    清理 reasoning_effort（OpenAI 格式，Anthropic API 不使用）。
+    output_config 是 Anthropic 格式，DeepSeek 支持 (仅 effort 子字段)，保留。
     """
     if "thinking" not in data:
         return False
@@ -393,12 +751,12 @@ def _normalize_thinking(data: dict) -> bool:
 
     thinking_type = thinking_cfg.get("type", "")
     if thinking_type in ("enabled", "disabled"):
-        # 清理 DeepSeek 不识别的字段
+        # 清理 DeepSeek 不识别的字段（OpenAI 格式的 reasoning_effort）
+        # 注意: output_config 是 Anthropic 格式字段，DeepSeek 支持 (仅 effort 子字段)
         cleaned = False
-        for key in ("reasoning_effort", "output_config"):
-            if data.pop(key, None) is not None:
-                logger.info("[THINKING] removed %s (type=%s)", key, thinking_type)
-                cleaned = True
+        if data.pop("reasoning_effort", None) is not None:
+            logger.info("[THINKING] removed reasoning_effort (type=%s)", thinking_type)
+            cleaned = True
         if thinking_type == "disabled":
             # disabled 模式需剥离历史中的 thinking 块
             stripped = 0
@@ -430,17 +788,18 @@ def _normalize_thinking(data: dict) -> bool:
                 cleaned = True
         return cleaned
 
-    # adaptive/auto → enabled（DeepSeek 自行管理思考触发时机）。
-    # 注意：工具调用和结构化 JSON 输出场景由 _should_disable_thinking() 精确保护。
-    target = "enabled"
+    # adaptive → 透传，让 DeepSeek/模型自行判断何时思考。
+    # Claude Code 通过 adaptive 控制思考：简单问题不思考，复杂问题深度思考。
+    # 注意: 不再强制 enabled/disabled，交给模型智能决策。
+    target = "adaptive"
     data["thinking"] = {"type": target}
 
-    for key in ("reasoning_effort", "output_config"):
+    for key in ("reasoning_effort",):
         val = data.pop(key, None)
         if val is not None:
             logger.info("[THINKING] removed %s=%s", key, val)
 
-    logger.info("[THINKING] converted %s → %s", thinking_type, target)
+    logger.info("[THINKING] preserved adaptive (was %s)", thinking_type)
     return True
 
 
@@ -533,8 +892,10 @@ def _should_disable_thinking(data: dict) -> bool:
 
     覆盖两种场景:
     1. 结构化 JSON 输出（response_format / output_config / output_format）
-    2. 工具调用（有 tools 字段）— DeepSeek 在 thinking=enabled 时
-       可能为工具调用消耗全部 max_tokens 在思考上
+    2. 工具调用（有 tools 字段）— 工具调用不需要思考，省 token
+
+    对 enabled 和 adaptive 类型均生效。
+    disabled 类型直接跳过（已经关了）。
 
     注意: 此函数须在 _translate_anthropic_structured_output() 之前调用，
     否则 output_config 字段会被 pop 导致漏检。
@@ -544,7 +905,7 @@ def _should_disable_thinking(data: dict) -> bool:
         return False
 
     thinking = data.get("thinking", {})
-    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+    if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "adaptive"):
         return False
 
     # 场景 1: 结构化输出
@@ -552,7 +913,7 @@ def _should_disable_thinking(data: dict) -> bool:
         logger.info("[THINKING] disabling for structured output")
         return True
 
-    # 场景 2: 工具调用 — 避免模型消耗全部 max_tokens 在思考上
+    # 场景 2: 工具调用 — 工具调用不需要思考，省 token
     if data.get("tools"):
         logger.info("[THINKING] disabling for tool calls (has tools)")
         return True
@@ -633,18 +994,25 @@ async def proxy(request: Request):
     is_messages_api = (method == "POST" and "/messages" in path.split("?")[0])
     is_chat_endpoint = (method == "POST" and path.rstrip("/").endswith("/messages"))
 
-    body = await request.body() if is_messages_api else b""
+    # 读取 body 与「是否需要改写」解耦：content-length 是原样透传给上游的，
+    # 只要方法可能带请求体就必须读出来，否则会声明一个与实际长度不符的长度，
+    # 上游在 h11 层直接报 Too little data for declared Content-Length。
+    body = await request.body() if method in _METHODS_WITH_BODY else b""
     modified_body = body
 
     if is_messages_api:
         try:
             data = json.loads(body)
             # Unicode 引号标准化: 排版引号 → ASCII 单引号
-            data = _normalize_quotes(data)
+            if NORMALIZE_QUOTES:
+                data = _normalize_quotes(data)
             # 仅主 chat 端点需要日志摘要
             if is_chat_endpoint:
                 logger.info("[REQ] %s", json.dumps(_summarize_request(data), ensure_ascii=False))
             _dump_json("last_request.json", data)
+            # 始终缓存最新请求（无需 PROXY_DUMP_DIR）
+            global _LAST_REQUEST
+            _LAST_REQUEST = data
 
             if is_chat_endpoint:
                 # 将 messages[] 中的 role:system 合并到顶层 system 字段，
@@ -656,14 +1024,27 @@ async def proxy(request: Request):
                         sys_count,
                     )
 
+                # Prompt cache 优化: 将不变的 Skills 块移到可变任务指令之前
+                # 可通过 PROXY_CACHE_REORDER=0 关闭，对比测试缓存/费用影响
+                if CACHE_REORDER and _reorder_system_blocks(data):
+                    modified = True
+
+                # Skills 块冻结: 首请求记录锚点，后续请求用锚点替代增长后的 Skills
+                if SKILLS_FREEZE and _freeze_skills_block(data):
+                    modified = True
+
+                # 环境上下文冻结: 冻结 git/os/date 等易变字段到首请求快照
+                if ENV_FREEZE and _freeze_env_context(data):
+                    modified = True
+
+                # 移除 cache_control: DeepSeek 不支持，Claude Code 滑动其位置造成偏移
+                if STRIP_CACHE_CTRL and _strip_cache_control(data) > 0:
+                    modified = True
+
                 thinking_normalized = _normalize_thinking(data)
 
-                if _inject_thinking_blocks(data):
-                    logger.info("[INJECT] added empty thinking block")
-                    thinking_normalized = True
-
-                # 在 _translate_anthropic_structured_output 之前检查，
-                # 避免 output_config 被 pop 后漏检（Codex 审查风险 #5）
+                # 工具调用/结构化输出 → 关闭思考省 token
+                # (对 enabled 和 adaptive 均生效)
                 if _should_disable_thinking(data):
                     data["thinking"] = {"type": "disabled"}
                     thinking_normalized = True
@@ -675,10 +1056,19 @@ async def proxy(request: Request):
                 if modified:
                     thinking_normalized = True
 
-                if thinking_normalized:
-                    modified_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                if thinking_normalized or modified:
+                    if CANONICAL_JSON:
+                        modified_body = json.dumps(
+                            data, ensure_ascii=False,
+                            separators=(",", ":"), sort_keys=True,
+                        ).encode("utf-8")
+                    else:
+                        modified_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
                     headers["content-length"] = str(len(modified_body))
                     _dump_json("last_request_modified.json", data)
+                    # 缓存修改后的请求
+                    global _LAST_MODIFIED_REQUEST
+                    _LAST_MODIFIED_REQUEST = data
 
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
@@ -695,13 +1085,79 @@ async def proxy(request: Request):
     logger.info("[RESP] status=%s sse=%s", upstream_resp.status_code, is_sse)
 
     async def passthrough():
+        _cache_info = []
+        _event_count = 0
         try:
             async for chunk in upstream_resp.aiter_bytes():
+                # 扫瞄 SSE 响应中的 cache 和 usage 信息
+                if is_sse:
+                    text = chunk.decode("utf-8", errors="replace")
+                    for line in text.split("\n"):
+                        if line.startswith("data: "):
+                            try:
+                                evt = json.loads(line[6:])
+                                evt_type = evt.get("type", "")
+                                _event_count += 1
+                                # 记录所有事件类型（方便调试）
+                                if _event_count <= 5:
+                                    logger.info("[SSE] #%d type=%s keys=%s", _event_count, evt_type, list(evt.keys()))
+                                # usage 事件（含 cache_creation_input_tokens / cache_read_input_tokens）
+                                if evt_type in ("message_delta", "response.output_message.delta", "error"):
+                                    usage = evt.get("usage", {}) or evt.get("response", {}).get("usage", {})
+                                    if usage:
+                                        cache_create = usage.get("cache_creation_input_tokens", 0)
+                                        cache_read = usage.get("cache_read_input_tokens", 0)
+                                        input_tokens = usage.get("input_tokens", 0)
+                                        output_tokens = usage.get("output_tokens", 0)
+                                        _cache_info.append({
+                                            "input_tokens": input_tokens,
+                                            "output_tokens": output_tokens,
+                                            "cache_creation": cache_create,
+                                            "cache_read": cache_read,
+                                        })
+                                        logger.info(
+                                            "[CACHE] input=%d output=%d read=%d write=%d (from %s)",
+                                            input_tokens, output_tokens, cache_read, cache_create, evt_type,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "[SSE-DUMP] %s: %s",
+                                            evt_type,
+                                            json.dumps(evt, ensure_ascii=False, default=str)[:200],
+                                        )
+                            except json.JSONDecodeError:
+                                pass
                 yield chunk
         except Exception:
             logger.exception("upstream stream read error")
         finally:
             await upstream_resp.aclose()
+        # 在流结束后记录缓存统计
+        if _cache_info:
+            global _LAST_RESPONSE_SUMMARY
+            _LAST_RESPONSE_SUMMARY = _cache_info[-1]
+            # 如果有之前的累计值，计算本次增量（delta）
+            global LAST_CACHE_ACCUMULATED, LAST_CACHE_DELTA
+            prev = LAST_CACHE_ACCUMULATED or {
+                "input_tokens": 0, "cache_read": 0, "cache_creation": 0, "output_tokens": 0,
+            }
+            curr = _cache_info[-1]
+            LAST_CACHE_DELTA = {
+                "input_tokens": curr["input_tokens"] - prev["input_tokens"],
+                "output_tokens": curr["output_tokens"] - prev["output_tokens"],
+                "cache_read": curr["cache_read"] - prev["cache_read"],
+                "cache_creation": curr["cache_creation"] - prev["cache_creation"],
+            }
+            LAST_CACHE_ACCUMULATED = dict(curr)
+            # 计算当前请求的有效缓存率
+            if LAST_CACHE_DELTA["input_tokens"] > 0:
+                rate = LAST_CACHE_DELTA["cache_read"] * 100.0 / LAST_CACHE_DELTA["input_tokens"]
+                logger.info(
+                    "[REQ-END] delta_in=%d delta_read=%d delta_write=%d cache_rate=%.1f%% acc_in=%d acc_read=%d",
+                    LAST_CACHE_DELTA["input_tokens"], LAST_CACHE_DELTA["cache_read"],
+                    LAST_CACHE_DELTA["cache_creation"], rate,
+                    curr["input_tokens"], curr["cache_read"],
+                )
 
     return StreamingResponse(
         passthrough(),
@@ -1016,11 +1472,91 @@ async def lifespan(app):
             pass
 
 
+# ---- 诊断端点 ----
+
+
+def _summarize_response(data: dict) -> dict:
+    """生成请求摘要，隐藏 sensity 内容但暴露影响缓存的关键属性。"""
+    msgs = data.get("messages", [])
+    system = data.get("system", "")
+    if isinstance(system, list):
+        system = " ".join(
+            b.get("text", "") if isinstance(b, dict) else str(b)
+            for b in system[:2]
+        )
+    # 计算 messages 中的系统消息
+    sys_in_messages = sum(
+        1 for m in msgs if isinstance(m, dict) and m.get("role") == "system"
+    )
+    # 每个消息的角色和内容长度
+    msg_summaries = []
+    for m in msgs[-10:]:  # 只展示最近 10 条
+        role = m.get("role", "?")
+        if isinstance(m.get("content"), str):
+            clen = len(m["content"])
+        elif isinstance(m.get("content"), list):
+            clen = sum(
+                len(b.get("text", "") or b.get("content", "") or b.get("name", "") or "")
+                for b in m["content"][:20]
+            )
+        else:
+            clen = 0
+        msg_summaries.append(f"{role}({clen}ch)")
+    return {
+        "model": data.get("model", "?"),
+        "stream": data.get("stream", False),
+        "max_tokens": data.get("max_tokens", "?"),
+        "thinking": data.get("thinking", "not set"),
+        "sys_len_in_top": len(system),
+        "sys_msgs_in_messages": sys_in_messages,
+        "tools": len(data.get("tools", [])),
+        "tool_names": [t.get("name", "?") for t in data.get("tools", [])[:5]],
+        "messages_count": len(msgs),
+        "messages_preview": msg_summaries,
+        "user_msgs": sum(1 for m in msgs if isinstance(m, dict) and m.get("role") == "user"),
+        "assistant_msgs": sum(1 for m in msgs if isinstance(m, dict) and m.get("role") == "assistant"),
+    }
+
+
+async def debug_handler(request: Request) -> JSONResponse:
+    """诊断端点：查看最近请求和缓存信息。"""
+    orig = _get_last_request()
+    modified = _get_last_modified_request()
+    return JSONResponse({
+        "version": VERSION,
+        "has_original": orig is not None,
+        "has_modified": modified is not None,
+        "original_summary": _summarize_response(orig) if orig else None,
+        "modified_summary": _summarize_response(modified) if modified else None,
+        "last_cache_summary": _LAST_RESPONSE_SUMMARY,
+        "last_cache_delta": LAST_CACHE_DELTA,
+        "cache_accumulated": LAST_CACHE_ACCUMULATED,
+    }, status_code=200)
+
+
+async def debug_full_handler(request: Request) -> JSONResponse:
+    """诊断端点：返回最近请求的完整内容（敏感数据存在！）。"""
+    orig = _get_last_request()
+    modified = _get_last_modified_request()
+    return JSONResponse({
+        "version": VERSION,
+        "original": orig,
+        "modified": modified,
+    }, status_code=200)
+
+
+def _is_internal(ip: str) -> bool:
+    """判断是否为本地/内网 IP。"""
+    return ip in ("127.0.0.1", "::1", "localhost") or ip.startswith(("10.", "172.16.", "192.168."))
+
+
 def create_app() -> Starlette:
     return Starlette(
         lifespan=lifespan,
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/_debug", debug_handler, methods=["GET"]),
+            Route("/_debug/full", debug_full_handler, methods=["GET"]),
             Route("/v1/responses/compact", compact_handler, methods=["POST"]),
             Route("/v1/responses", responses_handler, methods=["POST"]),
             Route("/v1/models", models_handler, methods=["GET"]),
