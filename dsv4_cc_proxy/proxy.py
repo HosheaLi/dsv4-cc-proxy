@@ -453,7 +453,6 @@ def _compute_session_key(data: dict) -> str:
 # ---- Skills 块冻结 ----
 
 _SKILLS_STORE: OrderedDict[str, str] = OrderedDict()
-_SKILLS_LOCK = asyncio.Lock()
 
 
 def _freeze_skills_block(data: dict) -> bool:
@@ -572,7 +571,6 @@ _ENV_MARKERS = (
     "Today's date",
 )
 _ENV_STORE: OrderedDict[str, str] = OrderedDict()
-_ENV_LOCK = asyncio.Lock()
 
 
 def _freeze_env_context(data: dict) -> bool:
