@@ -13,3 +13,5 @@ build/
 .coverage
 coverage.svg
 .claude/
+# 本地遗留的嵌套克隆，不属于仓库内容
+.homebrew-tap/

@@ -98,6 +98,67 @@ jobs:
         generate_release_notes: true
         name: v${{ steps.tag.outputs.VERSION }}
 
+    # --- Homebrew Tap update ---
+    - name: Update Homebrew Tap
+      env:
+        HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.tag.outputs.VERSION }}"
+        TARBALL_URL="https://github.com/HosheaLi/dsv4-cc-proxy/archive/refs/tags/v${VERSION}.tar.gz"
+
+        # -f: HTTP 错误直接失败，避免把错误页的哈希写进 formula
+        curl -fsSL "$TARBALL_URL" -o dsv4.tar.gz
+        SHA256=$(shasum -a 256 dsv4.tar.gz | cut -d' ' -f1)
+
+        git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/HosheaLi/homebrew-tap.git"
+        sed -e "s|TARBALL_URL_PLACEHOLDER|${TARBALL_URL}|" \
+            -e "s|SHA256_PLACEHOLDER|${SHA256}|" \
+            .github/templates/dsv4-cc-proxy.rb > homebrew-tap/Formula/dsv4-cc-proxy.rb
+
+        cd homebrew-tap
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add Formula/dsv4-cc-proxy.rb
+        if git diff --cached --quiet; then
+          echo "formula 无变化，跳过提交"
+        else
+          git commit -m "dsv4-cc-proxy v${VERSION}"
+          git push
+        fi
+
+    # --- Scoop bucket update ---
+    - name: Update Scoop bucket
+      env:
+        HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.tag.outputs.VERSION }}"
+        ZIP_URL="https://github.com/HosheaLi/dsv4-cc-proxy/archive/refs/tags/v${VERSION}.zip"
+        EXTRACT_DIR="dsv4-cc-proxy-${VERSION}"
+
+        # -f: HTTP 错误直接失败，避免把错误页的哈希写进 manifest
+        curl -fsSL "$ZIP_URL" -o dsv4.zip
+        HASH=$(shasum -a 256 dsv4.zip | cut -d' ' -f1)
+
+        git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/HosheaLi/scoop-bucket.git"
+        sed -e "s|VERSION_PLACEHOLDER|${VERSION}|" \
+            -e "s|ZIP_URL_PLACEHOLDER|${ZIP_URL}|" \
+            -e "s|EXTRACT_DIR_PLACEHOLDER|${EXTRACT_DIR}|" \
+            -e "s|HASH_PLACEHOLDER|${HASH}|" \
+            .github/templates/dsv4-cc-proxy.json > scoop-bucket/dsv4-cc-proxy.json
+
+        cd scoop-bucket
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add dsv4-cc-proxy.json
+        if git diff --cached --quiet; then
+          echo "manifest 无变化，跳过提交"
+        else
+          git commit -m "dsv4-cc-proxy v${VERSION}"
+          git push
+        fi
+
   publish-docker:
     runs-on: ubuntu-latest
     needs: [test]
